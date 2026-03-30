@@ -3,6 +3,12 @@
 ZKTransfer 성능 평가 및 기능 검증을 위한 테스트 스크립트 모음.
 
 ---
+테스트 법:
+./setup.sh
+./run_eval.sh
+순서대로 실행.
+
+---
 
 ## 사전 요구사항
 
@@ -66,7 +72,7 @@ Lifecycle API와 ZKTransfer API를 통해 테스트 환경을 구성합니다.
 
 ### 2단계: 성능 평가 실행 (`run_eval.sh`)
 
-`run_eval.sh`는 단건 / 다중 / E2E 세 가지 테스트 섹션을 통합 실행하고, 결과를 `logs/cpu<N>_<timestamp>.md` 파일로 저장합니다.
+`run_eval.sh`는 단건 / 다중 / E2E 세 가지 테스트 섹션을 통합 실행하고, 결과를 `logs/cpu_<N>_<timestamp>.md` 파일로 저장합니다.
 
 ```bash
 ./run_eval.sh <CPU_CORES> [SECTION]
@@ -108,7 +114,7 @@ Lifecycle API와 ZKTransfer API를 통해 테스트 환경을 구성합니다.
 #### 출력 결과
 
 ```
-logs/cpu8_20260330_153000.md
+logs/cpu_8_20260330_153000.md
 ```
 
 Markdown 표 형식으로 각 API의 평균 응답시간, P95, P99, TPS, 성공률/에러율을 기록합니다.
