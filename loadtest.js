@@ -2,16 +2,19 @@ import http from 'k6/http';
 import { check } from 'k6';
 import { Trend } from 'k6/metrics';
 
-// sds25-sc-lifecycle (8080) — 모든 zktransfer API 경유
 const SDS_ZK_BASE = __ENV.SDS_ZK_BASE || 'http://localhost:8080/rest/zktransfer';
 const SDS_CLIENT_ID = __ENV.SDS_CLIENT_ID || 'ADMIN_TOKEN';
 const SDS_CLIENT_SECRET = __ENV.SDS_CLIENT_SECRET || '41b5732026d04f9eb73b06021435ebb8';
 
+// 단건 테스트 폴백용 (e2e 모드에서 ACCOUNTS_FILE 없을 때)
 const TOKEN_ADDRESS = __ENV.TOKEN_ADDRESS || '';
 const ZK_ACCOUNT_ID_01 = __ENV.ZK_ACCOUNT_ID_01 || '';
-const ZK_ACCOUNT_ID_02 = __ENV.ZK_ACCOUNT_ID_02 || '';
 const SIGNER_ADDRESS = __ENV.SIGNER_ADDRESS || '';
 const MODE = __ENV.TEST_MODE || 'e2e';
+
+// VU별 계정 목록: [{accountId, signerAddress, tokenAddress}, ...]
+const ACCOUNTS_FILE = __ENV.ACCOUNTS_FILE || '';
+const e2eAccounts = ACCOUNTS_FILE ? JSON.parse(open(ACCOUNTS_FILE)) : [];
 
 // API별 커스텀 메트릭
 const accountDuration = new Trend('api_account', true);
@@ -50,14 +53,14 @@ function logFail(api, res) {
     }
 }
 
-// --- 개별 API 함수 (실패 시 throw) ---
+// --- 개별 API 함수 (tokenAddress를 인자로 받음) ---
 
-function doAccount(measure = false) {
+function doAccount() {
     const res = http.post(`${SDS_ZK_BASE}/accounts`, null, {
         headers: sdsHeaders(),
         tags: { api: 'account' },
     });
-    if (measure) accountDuration.add(res.timings.duration);
+    accountDuration.add(res.timings.duration);
     check(res, { '[account] status 200': bodyOk });
     if (!bodyOk(res)) {
         logFail('account', res);
@@ -69,10 +72,10 @@ function doAccount(measure = false) {
     };
 }
 
-function doApprove(accountId) {
+function doApprove(accountId, tokenAddress) {
     const res = http.post(`${SDS_ZK_BASE}/transfer/approve`, JSON.stringify({
         accountId,
-        tokenAddress: TOKEN_ADDRESS,
+        tokenAddress,
         amount: 10,
     }), { headers: sdsHeaders(), tags: { api: 'approve' } });
     approveDuration.add(res.timings.duration);
@@ -89,25 +92,12 @@ function doApprove(accountId) {
     return txHash;
 }
 
-function doDeposit(accountId) {
-    const payload = JSON.stringify({
+function doDeposit(accountId, tokenAddress) {
+    const res = http.post(`${SDS_ZK_BASE}/transfer/deposit`, JSON.stringify({
         fromAccountId: accountId,
-        tokenAddress: TOKEN_ADDRESS,
+        tokenAddress,
         amount: 10,
-    });
-    const headers = sdsHeaders();
-    console.log(`\n[deposit] REQUEST`);
-    console.log(`  URL    : POST ${SDS_ZK_BASE}/transfer/deposit`);
-    console.log(`  headers: ${JSON.stringify(headers)}`);
-    console.log(`  body   : ${payload}`);
-
-    const res = http.post(`${SDS_ZK_BASE}/transfer/deposit`, payload, {
-        headers,
-        tags: { api: 'deposit' },
-    });
-    console.log(`[deposit] RESPONSE`);
-    console.log(`  HTTP   : ${res.status}`);
-    console.log(`  body   : ${res.body}`);
+    }), { headers: sdsHeaders(), tags: { api: 'deposit' } });
     depositDuration.add(res.timings.duration);
     check(res, { '[deposit] status 200': bodyOk });
     if (!bodyOk(res)) {
@@ -116,11 +106,11 @@ function doDeposit(accountId) {
     }
 }
 
-function doSend(fromAccountId, toAccountId) {
+function doSend(fromAccountId, toAccountId, tokenAddress) {
     const res = http.post(`${SDS_ZK_BASE}/transfer/send`, JSON.stringify({
         fromAccountId,
         toAccountId,
-        tokenAddress: TOKEN_ADDRESS,
+        tokenAddress,
         amount: 10,
     }), { headers: sdsHeaders(), tags: { api: 'send' } });
     sendDuration.add(res.timings.duration);
@@ -132,10 +122,10 @@ function doSend(fromAccountId, toAccountId) {
     return res.json('data.txHash');
 }
 
-function doReceive(toAccountId, txHash) {
+function doReceive(toAccountId, txHash, tokenAddress) {
     const res = http.post(`${SDS_ZK_BASE}/transfer/receive`, JSON.stringify({
         toAccountId,
-        tokenAddress: TOKEN_ADDRESS,
+        tokenAddress,
         noteTxHash: txHash,
     }), { headers: sdsHeaders(), tags: { api: 'receive' } });
     receiveDuration.add(res.timings.duration);
@@ -146,11 +136,11 @@ function doReceive(toAccountId, txHash) {
     }
 }
 
-function doWithdraw(fromAccountId, eoaRecv) {
+function doWithdraw(fromAccountId, eoaRecv, tokenAddress) {
     const res = http.post(`${SDS_ZK_BASE}/transfer/withdraw`, JSON.stringify({
         fromAccountId,
         eoaRecv,
-        tokenAddress: TOKEN_ADDRESS,
+        tokenAddress,
         amount: 10,
     }), { headers: sdsHeaders(), tags: { api: 'withdraw' } });
     withdrawDuration.add(res.timings.duration);
@@ -161,59 +151,44 @@ function doWithdraw(fromAccountId, eoaRecv) {
     }
 }
 
-// --- 메인 ---
+// --- 풀 사이클: approve → deposit → account(acct2) → send → receive → withdraw ---
+function runFullCycle(sender, label) {
+    const tokenAddress = sender.tokenAddress;
+    let acct2;
+    try {
+        console.log(`[${label}] 1/6 approve`);
+        doApprove(sender.accountId, tokenAddress);
 
-export default function () {
+        console.log(`[${label}] 2/6 deposit`);
+        doDeposit(sender.accountId, tokenAddress);
 
-    if (MODE === 'account') {
-        try { doAccount(true); } catch { /* logFail에서 출력 */ }
-        return;
-    }
+        console.log(`[${label}] 3/6 account`);
+        acct2 = doAccount();
+        console.log(`[${label}] acct2=${acct2.accountId}`);
 
-    if (MODE === 'approve') {
-        try { doApprove(ZK_ACCOUNT_ID_01); } catch { }
-        return;
-    }
+        console.log(`[${label}] 4/6 send`);
+        const txHash = doSend(sender.accountId, acct2.accountId, tokenAddress);
+        console.log(`[${label}] txHash=${txHash}`);
 
-    if (MODE === 'deposit') {
-        try { doDeposit(ZK_ACCOUNT_ID_01); } catch { }
-        return;
-    }
-
-    if (MODE === 'send') {
-        try { doSend(ZK_ACCOUNT_ID_01, ZK_ACCOUNT_ID_02); } catch { }
-        return;
-    }
-
-    if (MODE === 'receive') {
-        try {
-            const txHash = doSend(ZK_ACCOUNT_ID_01, ZK_ACCOUNT_ID_02);
-            doReceive(ZK_ACCOUNT_ID_02, txHash);
-        } catch { }
-        return;
-    }
-
-    if (MODE === 'withdraw') {
-        try { doWithdraw(ZK_ACCOUNT_ID_02, SIGNER_ADDRESS); } catch { }
-        return;
-    }
-
-    // E2E: 전체 파이프라인
-    // acct1(ZK_ACCOUNT_ID_01)은 setup 때 생성된 계좌 사용
-    if (MODE === 'e2e') {
-        let acct2;
-        try {
-            doApprove(ZK_ACCOUNT_ID_01);
-            doDeposit(ZK_ACCOUNT_ID_01);
-            acct2 = doAccount(true);    // 비밀계좌생성2 (#16)
-            const txHash = doSend(ZK_ACCOUNT_ID_01, acct2.accountId);
-            doReceive(acct2.accountId, txHash);
-        } catch (e) {
-            console.error(`[e2e] 중단: ${e.message}`);
-        } finally {
-            if (acct2) {
-                try { doWithdraw(acct2.accountId, acct2.signerAddress); } catch { }
-            }
+        console.log(`[${label}] 5/6 receive`);
+        doReceive(acct2.accountId, txHash, tokenAddress);
+    } catch (e) {
+        console.error(`[${label}] 중단: ${e.message}`);
+    } finally {
+        if (acct2) {
+            console.log(`[${label}] 6/6 withdraw`);
+            try { doWithdraw(acct2.accountId, acct2.signerAddress, tokenAddress); } catch { }
         }
+    }
+}
+
+// --- 메인 ---
+export default function () {
+    if (MODE === 'e2e') {
+        const sender = e2eAccounts.length > 0
+            ? e2eAccounts[(__VU - 1) % e2eAccounts.length]
+            : { accountId: ZK_ACCOUNT_ID_01, signerAddress: SIGNER_ADDRESS, tokenAddress: TOKEN_ADDRESS };
+
+        runFullCycle(sender, `e2e:VU=${__VU}`);
     }
 }
