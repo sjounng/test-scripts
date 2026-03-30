@@ -1,37 +1,45 @@
 # ZKTransfer Test Scripts
 
+ZKTransfer 성능 평가 및 기능 검증을 위한 테스트 스크립트 모음.
+
+---
+
 ## 사전 요구사항
 
 - `bash`, `curl`, `jq`, `k6` 설치
-- Lifecycle API (`localhost:8080`), ZKTransfer Core API (`localhost:9080`) 실행 중
+- Lifecycle API (`localhost:8080`) 실행 중
+- ZKTransfer Core API (`localhost:9080`) 실행 중
 - MariaDB Docker 컨테이너 (`stc-mariadb`) 실행 중
 
 ---
 
 ## 파일 구조
 
-| 파일 | 설명 |
-|------|------|
-| `config.sh` | 환경 변수 및 테스트 데이터 설정 |
-| `lib.sh` | 공통 함수 (로그, API 호출, 상태 파일 관리) |
-| `setup.sh` | 전체 사전 세팅 (발행 → 사용자 → 전환 → 비밀계좌 → 전송) |
-| `run_single.sh` | 단건 / 부하 테스트 실행 |
-| `prepare_accounts.sh` | 부하 테스트용 다중 계좌 생성 |
-| `loadtest.js` | k6 테스트 스크립트 |
+```
+test-scripts/
+├── config/
+│   ├── config.sh        # 환경 변수 및 테스트 데이터 설정
+│   └── lib.sh           # 공통 함수 (로그, API 호출, 상태 파일 관리)
+├── setup.sh             # 사전 세팅 (발행 → 사용자 → 전환 → 비밀계좌 → 전송)
+├── run_eval.sh          # 성능 평가 통합 실행 (단건 / 다중 / E2E)
+├── run_single.sh        # 단건 / 부하 테스트 직접 실행
+├── loadtest.js          # k6 테스트 스크립트
+├── accounts.json        # 부하 테스트용 계정 목록 (자동 생성)
+└── logs/                # 결과 파일 저장 디렉토리
+```
 
 ---
 
 ## 실행 순서
 
-### 1. 사전 세팅
+### 1단계: 사전 세팅
 
 ```bash
 ./setup.sh
 ```
 
-`setup.sh`가 완료되면 `.state` 파일에 테스트에 필요한 상태값이 저장됩니다.
-
-setup.sh 단계:
+Lifecycle API와 ZKTransfer API를 통해 테스트 환경을 구성합니다.
+완료되면 `.state` 파일에 이후 테스트에 필요한 상태값이 저장됩니다.
 
 | 단계 | 내용 |
 |------|------|
@@ -51,17 +59,88 @@ setup.sh 단계:
 | 3-3 | 온체인 매수 (FiatToOnchain) |
 | 3-4 | 포트폴리오 재조회 |
 | 3-5 | 코인 계좌 조회 (지갑주소) |
-| 4-1 | 비밀 계좌 생성 |
+| 4-1 | ZK 비밀 계좌 생성 |
 | 5-1 | 코인 계좌 단건 조회 |
 | 5-2 | 전송 (On to On) |
 
-### 2. 테스트 실행
+---
+
+### 2단계: 성능 평가 실행 (`run_eval.sh`)
+
+`run_eval.sh`는 단건 / 다중 / E2E 세 가지 테스트 섹션을 통합 실행하고, 결과를 `logs/cpu<N>_<timestamp>.md` 파일로 저장합니다.
+
+```bash
+./run_eval.sh <CPU_CORES> [SECTION]
+```
+
+| 인자 | 필수 | 설명 |
+|------|------|------|
+| `CPU_CORES` | 필수 | 서버 CPU 코어 수 (결과 파일 식별용) |
+| `SECTION` | 선택 | `single` \| `multi` \| `e2e` \| `all` (기본: `all`) |
+
+#### 예시
+
+```bash
+# 전체 테스트 (단건 + 다중 + E2E)
+./run_eval.sh 8
+
+# 단건 테스트만
+./run_eval.sh 8 single
+
+# 다중 테스트만
+./run_eval.sh 8 multi
+
+# E2E 테스트만
+./run_eval.sh 8 e2e
+
+# 다른 CPU 환경
+./run_eval.sh 16
+./run_eval.sh 24 single
+```
+
+#### 테스트 섹션 설명
+
+| 섹션 | 내용 | 기본 설정 |
+|------|------|-----------|
+| `single` | 풀 사이클 단건 반복 측정 | 10회 반복, VU 1 |
+| `multi` | API 단계별 동시 부하 측정 | VU 10/20/30, Duration 30s |
+| `e2e` | 각 VU가 풀 사이클 반복 | VU 10/20/30, Duration 30s |
+
+#### 출력 결과
+
+```
+logs/cpu8_20260330_153000.md
+```
+
+Markdown 표 형식으로 각 API의 평균 응답시간, P95, P99, TPS, 성공률/에러율을 기록합니다.
+
+---
+
+### (선택) 부하 테스트용 계정 사전 준비
+
+`run_eval.sh`의 `multi` / `e2e` 섹션은 VU 수만큼 독립 계정이 필요합니다.
+`accounts.json`이 없거나 계정 수가 부족하면 자동으로 준비합니다.
+
+수동으로 미리 준비하려면:
+
+```bash
+# accounts.json을 직접 생성하려면 run_eval.sh의 prepare_accounts 함수가 자동 실행됨
+# 별도 준비 없이 run_eval.sh 실행 시 자동 처리됨
+```
+
+> `accounts.json`이 이미 있고 필요한 VU 수 이상의 계정이 있으면 재사용합니다.
+
+---
+
+## 단건 / 부하 테스트 직접 실행 (`run_single.sh`)
+
+개별 단계를 직접 실행하거나 빠르게 부하를 줄 때 사용합니다.
 
 ```bash
 ./run_single.sh [단계...] [옵션]
 ```
 
-#### 단계 플래그 (복수 지정 가능)
+#### 단계 플래그
 
 | 플래그 | 설명 |
 |--------|------|
@@ -102,19 +181,11 @@ setup.sh 단계:
 ./run_single.sh -all --vus 5 --duration 60s
 ```
 
-### 3. 부하 테스트용 다중 계좌 준비 (선택)
-
-```bash
-./prepare_accounts.sh [계좌수]   # 기본: 30
-```
-
-`setup.sh` 완료 후 실행. 지정한 수만큼 독립 계좌를 생성하고 각 계좌에 10,000 토큰을 충전합니다.
-
 ---
 
-## 상태 파일 (.state)
+## 상태 파일 (`.state`)
 
-`setup.sh` 실행 시 자동 생성되며, `run_single.sh`가 이를 참조합니다.
+`setup.sh` 실행 시 자동 생성되며, `run_eval.sh`와 `run_single.sh`가 참조합니다.
 
 ```
 RUN_ID=...
@@ -131,13 +202,16 @@ SIGNER_ADDRESS=...
 
 ---
 
-## 주요 환경 변수 (`config.sh`)
+## 주요 환경 변수 (`config/config.sh`)
 
 | 변수 | 기본값 | 설명 |
 |------|--------|------|
 | `LIFECYCLE_BASE` | `http://localhost:8080/rest/v1/dlt/stc` | Lifecycle API |
-| `ZK_BASE` | `http://localhost:9080/v1` | ZKTransfer Core API |
+| `SDS_ZK_BASE` | `http://localhost:8080/rest/zktransfer` | ZKTransfer API |
 | `MAINNET_NAME` | `SDSMainNet_{RUN_ID}` | 메인넷 이름 (실행마다 고유) |
 | `MAINNET_CHAIN_ID` | `{RUN_ID}` | 체인 ID (실행마다 고유) |
 | `SC_NAME` | `MySC_{RUN_ID}` | 스마트 컨트랙트 이름 |
 | `SC_SYMBOL` | `MS{SHORT_ID}` | 토큰 심볼 |
+| `SINGLE_ITERATIONS` | `10` | 단건 테스트 반복 횟수 (`run_eval.sh`) |
+| `MULTI_DURATION` | `30s` | 다중/E2E 테스트 지속 시간 |
+| `VUS_LIST` | `(10 20 30)` | 다중/E2E 테스트 VU 단계 |
