@@ -1,5 +1,6 @@
 import http from 'k6/http';
-import { check, Trend } from 'k6';
+import { check } from 'k6';
+import { Trend } from 'k6/metrics';
 
 // sds25-sc-lifecycle (8080) — 모든 zktransfer API 경유
 const SDS_ZK_BASE = __ENV.SDS_ZK_BASE || 'http://localhost:8080/rest/zktransfer';
