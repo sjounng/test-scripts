@@ -8,12 +8,6 @@ LIFECYCLE_HOST="http://localhost"
 LIFECYCLE_PORT="8080"
 LIFECYCLE_BASE="${LIFECYCLE_HOST}:${LIFECYCLE_PORT}/rest/v1/dlt/stc"
 
-# --- ZKTransfer Core API (9080) ---
-ZK_HOST="http://localhost"
-ZK_PORT="9080"
-ZK_BASE="${ZK_HOST}:${ZK_PORT}/v1"
-ZK_API_KEY="${ZKTRANSFER_CORE_API_KEY:-dev-api-key}"
-
 # --- SDS-25 ZKTransfer API (8080) ---
 SDS_ZK_BASE="${LIFECYCLE_HOST}:${LIFECYCLE_PORT}/rest/zktransfer"
 
