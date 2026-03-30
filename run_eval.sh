@@ -12,7 +12,7 @@
 #   ./run_eval.sh 8 multi     # 다중 테스트만
 #   ./run_eval.sh 8 e2e       # E2E 테스트만
 #
-# 출력: logs/perf_cpu<N>_<timestamp>.md
+# 출력: logs/cpu_<N>_<timestamp>.md
 # ============================================
 set -euo pipefail
 
@@ -56,7 +56,7 @@ APIS=(account approve deposit send receive withdraw)
 LOG_DIR="${SCRIPT_DIR}/logs"
 mkdir -p "$LOG_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-RESULT_FILE="${LOG_DIR}/cpu${CPU_CORES}_${TIMESTAMP}.md"
+RESULT_FILE="${LOG_DIR}/cpu_${CPU_CORES}_${TIMESTAMP}.md"
 DEFAULT_ACCOUNTS_FILE="${SCRIPT_DIR}/accounts.json"
 
 # ---- k6 실행 함수 ----
