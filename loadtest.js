@@ -17,7 +17,7 @@ const MODE = __ENV.TEST_MODE || 'e2e';
 const accountDuration = new Trend('api_account', true);
 const approveDuration = new Trend('api_approve', true);
 const depositDuration = new Trend('api_deposit', true);
-const sendDuration = new Trend('api_send', true);
+const sendDuration    = new Trend('api_send', true);
 const receiveDuration = new Trend('api_receive', true);
 const withdrawDuration = new Trend('api_withdraw', true);
 
@@ -33,36 +33,60 @@ function sdsHeaders() {
     };
 }
 
-// --- 개별 API 함수 ---
+function bodyOk(r) {
+    try { return r.json('status') === 200; } catch { return false; }
+}
 
-function doAccount() {
+function logFail(api, res) {
+    console.error(`\n[${api}] FAIL`);
+    console.error(`  HTTP  : ${res.status}`);
+    try {
+        const body = res.json();
+        console.error(`  status: ${body.status}`);
+        if (body.error) console.error(`  error : ${JSON.stringify(body.error)}`);
+        if (body.data)  console.error(`  data  : ${JSON.stringify(body.data)}`);
+    } catch {
+        console.error(`  body  : ${res.body}`);
+    }
+}
+
+// --- 개별 API 함수 (실패 시 throw) ---
+
+function doAccount(measure = false) {
     const res = http.post(`${SDS_ZK_BASE}/accounts`, null, {
         headers: sdsHeaders(),
         tags: { api: 'account' },
     });
-    accountDuration.add(res.timings.duration);
-    check(res, { '[account] 20X': (r) => r.status >= 200 && r.status < 300 });
-    if (res.status >= 200 && res.status < 300) {
-        return {
-            accountId: res.json('data.accountId'),
-            signerAddress: res.json('data.signerAddress'),
-        };
+    if (measure) accountDuration.add(res.timings.duration);
+    check(res, { '[account] status 200': bodyOk });
+    if (!bodyOk(res)) {
+        logFail('account', res);
+        throw new Error('account 실패');
     }
-    return null;
+    return {
+        accountId: res.json('data.accountId'),
+        signerAddress: res.json('data.signerAddress'),
+    };
 }
 
 function doApprove(accountId) {
-    const payload = JSON.stringify({
-        accountId: accountId,
+    const res = http.post(`${SDS_ZK_BASE}/transfer/approve`, JSON.stringify({
+        accountId,
         tokenAddress: TOKEN_ADDRESS,
         amount: 10,
-    });
-    const res = http.post(`${SDS_ZK_BASE}/transfer/approve`, payload, {
-        headers: sdsHeaders(),
-        tags: { api: 'approve' },
-    });
+    }), { headers: sdsHeaders(), tags: { api: 'approve' } });
     approveDuration.add(res.timings.duration);
-    check(res, { '[approve] 20X': (r) => r.status >= 200 && r.status < 300 });
+    check(res, { '[approve] status 200': bodyOk });
+    if (!bodyOk(res)) {
+        logFail('approve', res);
+        throw new Error('approve 실패');
+    }
+    const txHash = res.json('data.txHash');
+    if (!txHash) {
+        logFail('approve', res);
+        throw new Error('approve tx 미확정 (txHash 없음)');
+    }
+    return txHash;
 }
 
 function doDeposit(accountId) {
@@ -71,115 +95,125 @@ function doDeposit(accountId) {
         tokenAddress: TOKEN_ADDRESS,
         amount: 10,
     });
+    const headers = sdsHeaders();
+    console.log(`\n[deposit] REQUEST`);
+    console.log(`  URL    : POST ${SDS_ZK_BASE}/transfer/deposit`);
+    console.log(`  headers: ${JSON.stringify(headers)}`);
+    console.log(`  body   : ${payload}`);
+
     const res = http.post(`${SDS_ZK_BASE}/transfer/deposit`, payload, {
-        headers: sdsHeaders(),
+        headers,
         tags: { api: 'deposit' },
     });
+    console.log(`[deposit] RESPONSE`);
+    console.log(`  HTTP   : ${res.status}`);
+    console.log(`  body   : ${res.body}`);
     depositDuration.add(res.timings.duration);
-    check(res, { '[deposit] 20X': (r) => r.status >= 200 && r.status < 300 });
+    check(res, { '[deposit] status 200': bodyOk });
+    if (!bodyOk(res)) {
+        logFail('deposit', res);
+        throw new Error('deposit 실패');
+    }
 }
 
 function doSend(fromAccountId, toAccountId) {
-    const payload = JSON.stringify({
-        fromAccountId: fromAccountId,
-        toAccountId: toAccountId,
+    const res = http.post(`${SDS_ZK_BASE}/transfer/send`, JSON.stringify({
+        fromAccountId,
+        toAccountId,
         tokenAddress: TOKEN_ADDRESS,
         amount: 10,
-    });
-    const res = http.post(`${SDS_ZK_BASE}/transfer/send`, payload, {
-        headers: sdsHeaders(),
-        tags: { api: 'send' },
-    });
+    }), { headers: sdsHeaders(), tags: { api: 'send' } });
     sendDuration.add(res.timings.duration);
-    check(res, { '[send] 20X': (r) => r.status >= 200 && r.status < 300 });
-    if (res.status >= 200 && res.status < 300) {
-        const txHash = res.json('data.txHash');
-        if (!txHash) {
-            console.warn(`[SEND 이상] 20X이지만 txHash 없음: ${res.body}`);
-        }
-        return txHash;
+    check(res, { '[send] status 200': bodyOk });
+    if (!bodyOk(res)) {
+        logFail('send', res);
+        throw new Error('send 실패');
     }
-    return null;
+    return res.json('data.txHash');
 }
 
 function doReceive(toAccountId, txHash) {
-    const payload = JSON.stringify({
-        toAccountId: toAccountId,
+    const res = http.post(`${SDS_ZK_BASE}/transfer/receive`, JSON.stringify({
+        toAccountId,
         tokenAddress: TOKEN_ADDRESS,
         noteTxHash: txHash,
-    });
-    const res = http.post(`${SDS_ZK_BASE}/transfer/receive`, payload, {
-        headers: sdsHeaders(),
-        tags: { api: 'receive' },
-    });
+    }), { headers: sdsHeaders(), tags: { api: 'receive' } });
     receiveDuration.add(res.timings.duration);
-    check(res, { '[receive] 20X': (r) => r.status >= 200 && r.status < 300 });
+    check(res, { '[receive] status 200': bodyOk });
+    if (!bodyOk(res)) {
+        logFail('receive', res);
+        throw new Error('receive 실패');
+    }
 }
 
 function doWithdraw(fromAccountId, eoaRecv) {
-    const payload = JSON.stringify({
-        fromAccountId: fromAccountId,
-        eoaRecv: eoaRecv,
+    const res = http.post(`${SDS_ZK_BASE}/transfer/withdraw`, JSON.stringify({
+        fromAccountId,
+        eoaRecv,
         tokenAddress: TOKEN_ADDRESS,
         amount: 10,
-    });
-    const res = http.post(`${SDS_ZK_BASE}/transfer/withdraw`, payload, {
-        headers: sdsHeaders(),
-        tags: { api: 'withdraw' },
-    });
+    }), { headers: sdsHeaders(), tags: { api: 'withdraw' } });
     withdrawDuration.add(res.timings.duration);
-    check(res, { '[withdraw] 20X': (r) => r.status >= 200 && r.status < 300 });
+    check(res, { '[withdraw] status 200': bodyOk });
+    if (!bodyOk(res)) {
+        logFail('withdraw', res);
+        throw new Error('withdraw 실패');
+    }
 }
 
 // --- 메인 ---
 
 export default function () {
 
-    // 개별 API 모드: .state의 기존 계좌로 해당 API만 측정
     if (MODE === 'account') {
-        doAccount();
+        try { doAccount(true); } catch { /* logFail에서 출력 */ }
         return;
     }
 
     if (MODE === 'approve') {
-        doApprove(ZK_ACCOUNT_ID_01);
+        try { doApprove(ZK_ACCOUNT_ID_01); } catch { }
         return;
     }
 
     if (MODE === 'deposit') {
-        doDeposit(ZK_ACCOUNT_ID_01);
+        try { doDeposit(ZK_ACCOUNT_ID_01); } catch { }
         return;
     }
 
     if (MODE === 'send') {
-        doSend(ZK_ACCOUNT_ID_01, ZK_ACCOUNT_ID_02);
+        try { doSend(ZK_ACCOUNT_ID_01, ZK_ACCOUNT_ID_02); } catch { }
         return;
     }
 
     if (MODE === 'receive') {
-        const txHash = doSend(ZK_ACCOUNT_ID_01, ZK_ACCOUNT_ID_02);
-        if (txHash) doReceive(ZK_ACCOUNT_ID_02, txHash);
+        try {
+            const txHash = doSend(ZK_ACCOUNT_ID_01, ZK_ACCOUNT_ID_02);
+            doReceive(ZK_ACCOUNT_ID_02, txHash);
+        } catch { }
         return;
     }
 
     if (MODE === 'withdraw') {
-        doWithdraw(ZK_ACCOUNT_ID_01, SIGNER_ADDRESS);
+        try { doWithdraw(ZK_ACCOUNT_ID_02, SIGNER_ADDRESS); } catch { }
         return;
     }
 
-    // E2E: 전체 파이프라인 (매 iteration마다 신규 계좌 생성)
+    // E2E: 전체 파이프라인
+    // acct1(ZK_ACCOUNT_ID_01)은 setup 때 생성된 계좌 사용
     if (MODE === 'e2e') {
-        const acct1 = doAccount();
-        if (!acct1) return;
-
-        doApprove(acct1.accountId);
-        doDeposit(acct1.accountId);
-
-        const acct2 = doAccount();
-        if (!acct2) return;
-        const txHash = doSend(acct1.accountId, acct2.accountId);
-
-        if (txHash) doReceive(acct2.accountId, txHash);
-        doWithdraw(acct2.accountId, acct2.signerAddress);
+        let acct2;
+        try {
+            doApprove(ZK_ACCOUNT_ID_01);
+            doDeposit(ZK_ACCOUNT_ID_01);
+            acct2 = doAccount(true);    // 비밀계좌생성2 (#16)
+            const txHash = doSend(ZK_ACCOUNT_ID_01, acct2.accountId);
+            doReceive(acct2.accountId, txHash);
+        } catch (e) {
+            console.error(`[e2e] 중단: ${e.message}`);
+        } finally {
+            if (acct2) {
+                try { doWithdraw(acct2.accountId, acct2.signerAddress); } catch { }
+            }
+        }
     }
 }

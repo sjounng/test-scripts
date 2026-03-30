@@ -22,11 +22,7 @@ call_api POST "${LIFECYCLE_BASE}/sc/mainnets" \
         \"endpoint\": \"${MAINNET_ENDPOINT}\",
         \"chainId\": ${MAINNET_CHAIN_ID}
     }"
-if [[ "$HTTP_STATUS" == "302" ]]; then
-    log_ok "메인넷 이미 등록됨 (HTTP 302)"
-else
-    check_http_ok "메인넷 등록" || die "메인넷 등록 실패"
-fi
+check_http_ok "메인넷 등록" || die "메인넷 등록 실패"
 
 # 발행 계획 등록
 log_step "1-2) 발행 계획 등록"

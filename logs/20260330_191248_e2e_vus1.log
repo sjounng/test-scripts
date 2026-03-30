@@ -1,0 +1,103 @@
+========================================
+  실행 시각 : 2026-03-30 19:12:48
+  모드      : 단건 테스트 | 반복: 1회 | VUs: 1
+  대상      : e2e
+  VUs       : 1
+  Iterations: 1
+========================================
+
+---- [e2e] ----
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+
+     execution: local
+        script: loadtest.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 1 max VUs, 10m30s max duration (incl. graceful stop):
+              * default: 1 iterations shared among 1 VUs (maxDuration: 10m0s, gracefulStop: 30s)
+
+
+running (00m01.0s), 1/1 VUs, 0 complete and 0 interrupted iterations
+default   [   0% ] 1 VUs  00m01.0s/10m0s  0/1 shared iters
+time="2026-03-30T19:12:49+09:00" level=info msg="\n[deposit] REQUEST" source=console
+time="2026-03-30T19:12:49+09:00" level=info msg="  URL    : POST http://localhost:8080/rest/zktransfer/transfer/deposit" source=console
+time="2026-03-30T19:12:49+09:00" level=info msg="  headers: {\"Content-Type\":\"application/json\",\"X-Lego-Client-Id\":\"ADMIN_TOKEN\",\"X-Lego-Client-Secret\":\"41b5732026d04f9eb73b06021435ebb8\"}" source=console
+time="2026-03-30T19:12:49+09:00" level=info msg="  body   : {\"fromAccountId\":\"account-b0b75df9e8ac\",\"tokenAddress\":\"0xec2a2ad2839a0f6d6e8209c49244397041cac887\",\"amount\":10}" source=console
+
+running (00m02.0s), 1/1 VUs, 0 complete and 0 interrupted iterations
+default   [   0% ] 1 VUs  00m02.0s/10m0s  0/1 shared iters
+
+running (00m03.0s), 1/1 VUs, 0 complete and 0 interrupted iterations
+default   [   0% ] 1 VUs  00m03.0s/10m0s  0/1 shared iters
+time="2026-03-30T19:12:52+09:00" level=info msg="[deposit] RESPONSE" source=console
+time="2026-03-30T19:12:52+09:00" level=info msg="  HTTP   : 200" source=console
+time="2026-03-30T19:12:52+09:00" level=info msg="  body   : {\"status\":200,\"data\":{\"txHash\":\"0xdeeece684c52d309def8889b5fb77b2b80cf1a34a39c82635e3916c254ce96fd\",\"txData\":\"0x4291f00c000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000001a0000000000000000000000000b055f0891002bf280e5368153e19fd9c0c22f8e9000000000000000000000000ec2a2ad2839a0f6d6e8209c49244397041cac88700000000000000000000000000000000000000000000000000000000000000081fb3c5d88d8c27bcae7498813f2c848493f946437c87e52f1afd2c48772b17aa141e30c86f63903cae498d5380343f755daa92502db6ca79b613bf8f29fd3fa72c52afc1966f263b649c6280e5d1c64bc82393cefdd715957a69bc7304d3e25b1177e3303ea65c1a73e36bf0cde3c24fd2cc1f07f06b6400ac7a46bd0ad8245c04ef794ee6d19cadb5a20e2ef80a3cf3d344081ceb0072b5c5edd44dd9dc0303178653d5557ec6093312f7252fce1282ee47457653ab8e79896f90e74c6c215a0711c134afdb6fd0899ae49fcd3d11cd2915df79302b39368d663629b0b31ae42765120133e9eff4456f7e12f32ae9fbde6d90912d31e8f34d9ff9913011d9b7000000000000000000000000000000000000000000000000000000000000001622ca710f4d8902b60fd75f56447050c046b6023a33789a04cddf02c0c8c5bfb911290bad7e2477ba508280627724f9fdf207ef0272b6a8d61ae2933caeb4560c21faef5350ef225348957da7db9a463609ac301c42fb34ea6a88694be1bc992614ef20891a90736ffb69d62dc41873c30aacaf5e31a9e0b16b8878af874fd91105e52695f40d99400727cf365c1f619a7a32dfaf4c316c9f7a95fb2abfa261082de43cc07833f78627cf9bf85d5e122298bd3497b6ccb2d6095e2c62542f3cf2282bde7f64909fd1392b9895d1c0de1032f0686c017cfe4fa643663361625ddf00000000000000000000000000000000000000000000000000000000009896800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ec2a2ad2839a0f6d6e8209c49244397041cac88700000000000000000000000000000000000000000000000000000000000000000ca436708f7b5d3689a6eae9af8ca946ad7dfddf245b08c9407b6139a459742a29e6baa3edf829f8560747c6d51f8b8c073b98330b0b30d1166a416a77c756a32d6cfb2aa5bf6327df2b1332689cf8747b6e049c04af3966f40edb68215ad7c403d52ea536706c0055b3b2a0885d9f7cbe375807ab2bf355bfb932a6968118ca04684b290db64a4a2601eb2af66e3595cacb9c3f101af617c22dca1c4def8074179b721e92e11ef1f6559709043bcad96e923592a44c70de84dd6da87737fde221f84ab2930ec6806bf3ca3453f760d3d21d5f7e7afa9e496fa8b84c68758760201d179f507f0099ce07653092666545616511128c62e7edb8e4e08124f0e653115177e4662e75e2d2258a42faf3cc3412aaad77e819e43d526b2601dee539bf19e0e93567332cd998d359e2e7aa50d9469ee68d81684ac201faace8020c60e0099862f5e8b8ac7dca4ce3ecef42a8b0beae2935cea055172b72382f1f273f7e\"}}" source=console
+
+running (00m04.0s), 1/1 VUs, 0 complete and 0 interrupted iterations
+default   [   0% ] 1 VUs  00m04.0s/10m0s  0/1 shared iters
+
+running (00m05.0s), 1/1 VUs, 0 complete and 0 interrupted iterations
+default   [   0% ] 1 VUs  00m05.0s/10m0s  0/1 shared iters
+
+running (00m06.0s), 1/1 VUs, 0 complete and 0 interrupted iterations
+default   [   0% ] 1 VUs  00m06.0s/10m0s  0/1 shared iters
+
+running (00m07.0s), 1/1 VUs, 0 complete and 0 interrupted iterations
+default   [   0% ] 1 VUs  00m07.0s/10m0s  0/1 shared iters
+
+running (00m08.0s), 1/1 VUs, 0 complete and 0 interrupted iterations
+default   [   0% ] 1 VUs  00m08.0s/10m0s  0/1 shared iters
+
+running (00m09.0s), 1/1 VUs, 0 complete and 0 interrupted iterations
+default   [   0% ] 1 VUs  00m09.0s/10m0s  0/1 shared iters
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 6       0.641173/s
+    checks_succeeded...: 100.00% 6 out of 6
+    checks_failed......: 0.00%   0 out of 6
+
+    ✓ [approve] status 200
+    ✓ [deposit] status 200
+    ✓ [account] status 200
+    ✓ [send] status 200
+    ✓ [receive] status 200
+    ✓ [withdraw] status 200
+
+    CUSTOM
+    api_account....................: avg=1.15s min=1.15s max=1.15s p(95)=1.15s p(99)=1.15s
+    api_approve....................: avg=1.09s min=1.09s max=1.09s p(95)=1.09s p(99)=1.09s
+    api_deposit....................: avg=2.52s min=2.52s max=2.52s p(95)=2.52s p(99)=2.52s
+    api_receive....................: avg=1.51s min=1.51s max=1.51s p(95)=1.51s p(99)=1.51s
+    api_send.......................: avg=1.56s min=1.56s max=1.56s p(95)=1.56s p(99)=1.56s
+    api_withdraw...................: avg=1.49s min=1.49s max=1.49s p(95)=1.49s p(99)=1.49s
+
+    HTTP
+    http_req_duration..............: avg=1.55s min=1.09s max=2.52s p(95)=2.28s p(99)=2.47s
+      { expected_response:true }...: avg=1.55s min=1.09s max=2.52s p(95)=2.28s p(99)=2.47s
+    http_req_failed................: 0.00%  0 out of 6
+    http_reqs......................: 6      0.641173/s
+
+    EXECUTION
+    iteration_duration.............: avg=9.35s min=9.35s max=9.35s p(95)=9.35s p(99)=9.35s
+    iterations.....................: 1      0.106862/s
+    vus............................: 1      min=1      max=1
+    vus_max........................: 1      min=1      max=1
+
+    NETWORK
+    data_received..................: 14 kB  1.5 kB/s
+    data_sent......................: 2.5 kB 266 B/s
+
+
+
+
+running (00m09.4s), 0/1 VUs, 1 complete and 0 interrupted iterations
+default ✓ [ 100% ] 1 VUs  00m09.4s/10m0s  1/1 shared iters
+[PASS] e2e 완료 (10s)
