@@ -55,12 +55,14 @@ function logFail(api, res) {
 
 // --- 개별 API 함수 (tokenAddress를 인자로 받음) ---
 
-function doAccount() {
+function doAccount(trackMetric = true) {
     const res = http.post(`${SDS_ZK_BASE}/accounts`, null, {
         headers: sdsHeaders(),
         tags: { api: 'account' },
     });
-    accountDuration.add(res.timings.duration);
+    if (trackMetric) {
+        accountDuration.add(res.timings.duration);
+    }
     check(res, { '[account] status 200': bodyOk });
     if (!bodyOk(res)) {
         logFail('account', res);
@@ -72,13 +74,15 @@ function doAccount() {
     };
 }
 
-function doApprove(accountId, tokenAddress) {
+function doApprove(accountId, tokenAddress, trackMetric = true) {
     const res = http.post(`${SDS_ZK_BASE}/transfer/approve`, JSON.stringify({
         accountId,
         tokenAddress,
         amount: 10,
     }), { headers: sdsHeaders(), tags: { api: 'approve' } });
-    approveDuration.add(res.timings.duration);
+    if (trackMetric) {
+        approveDuration.add(res.timings.duration);
+    }
     check(res, { '[approve] status 200': bodyOk });
     if (!bodyOk(res)) {
         logFail('approve', res);
@@ -92,13 +96,15 @@ function doApprove(accountId, tokenAddress) {
     return txHash;
 }
 
-function doDeposit(accountId, tokenAddress) {
+function doDeposit(accountId, tokenAddress, trackMetric = true) {
     const res = http.post(`${SDS_ZK_BASE}/transfer/deposit`, JSON.stringify({
         fromAccountId: accountId,
         tokenAddress,
         amount: 10,
     }), { headers: sdsHeaders(), tags: { api: 'deposit' } });
-    depositDuration.add(res.timings.duration);
+    if (trackMetric) {
+        depositDuration.add(res.timings.duration);
+    }
     check(res, { '[deposit] status 200': bodyOk });
     if (!bodyOk(res)) {
         logFail('deposit', res);
@@ -106,14 +112,16 @@ function doDeposit(accountId, tokenAddress) {
     }
 }
 
-function doSend(fromAccountId, toAccountId, tokenAddress) {
+function doSend(fromAccountId, toAccountId, tokenAddress, trackMetric = true) {
     const res = http.post(`${SDS_ZK_BASE}/transfer/send`, JSON.stringify({
         fromAccountId,
         toAccountId,
         tokenAddress,
         amount: 10,
     }), { headers: sdsHeaders(), tags: { api: 'send' } });
-    sendDuration.add(res.timings.duration);
+    if (trackMetric) {
+        sendDuration.add(res.timings.duration);
+    }
     check(res, { '[send] status 200': bodyOk });
     if (!bodyOk(res)) {
         logFail('send', res);
@@ -122,13 +130,15 @@ function doSend(fromAccountId, toAccountId, tokenAddress) {
     return res.json('data.txHash');
 }
 
-function doReceive(toAccountId, txHash, tokenAddress) {
+function doReceive(toAccountId, txHash, tokenAddress, trackMetric = true) {
     const res = http.post(`${SDS_ZK_BASE}/transfer/receive`, JSON.stringify({
         toAccountId,
         tokenAddress,
         noteTxHash: txHash,
     }), { headers: sdsHeaders(), tags: { api: 'receive' } });
-    receiveDuration.add(res.timings.duration);
+    if (trackMetric) {
+        receiveDuration.add(res.timings.duration);
+    }
     check(res, { '[receive] status 200': bodyOk });
     if (!bodyOk(res)) {
         logFail('receive', res);
@@ -136,14 +146,16 @@ function doReceive(toAccountId, txHash, tokenAddress) {
     }
 }
 
-function doWithdraw(fromAccountId, eoaRecv, tokenAddress) {
+function doWithdraw(fromAccountId, eoaRecv, tokenAddress, trackMetric = true) {
     const res = http.post(`${SDS_ZK_BASE}/transfer/withdraw`, JSON.stringify({
         fromAccountId,
         eoaRecv,
         tokenAddress,
         amount: 10,
     }), { headers: sdsHeaders(), tags: { api: 'withdraw' } });
-    withdrawDuration.add(res.timings.duration);
+    if (trackMetric) {
+        withdrawDuration.add(res.timings.duration);
+    }
     check(res, { '[withdraw] status 200': bodyOk });
     if (!bodyOk(res)) {
         logFail('withdraw', res);
@@ -182,13 +194,59 @@ function runFullCycle(sender, label) {
     }
 }
 
+function getSender() {
+    return e2eAccounts.length > 0
+        ? e2eAccounts[(__VU - 1) % e2eAccounts.length]
+        : { accountId: ZK_ACCOUNT_ID_01, signerAddress: SIGNER_ADDRESS, tokenAddress: TOKEN_ADDRESS };
+}
+
+function runMode(sender, label) {
+    const tokenAddress = sender.tokenAddress;
+
+    switch (MODE) {
+    case 'account':
+        console.log(`[${label}] account`);
+        doAccount();
+        break;
+    case 'approve':
+        console.log(`[${label}] approve`);
+        doApprove(sender.accountId, tokenAddress);
+        break;
+    case 'deposit':
+        console.log(`[${label}] deposit`);
+        doDeposit(sender.accountId, tokenAddress);
+        break;
+    case 'send': {
+        console.log(`[${label}] send`);
+        const receiver = doAccount(false);
+        doSend(sender.accountId, receiver.accountId, tokenAddress);
+        break;
+    }
+    case 'receive': {
+        console.log(`[${label}] receive`);
+        const receiver = doAccount(false);
+        const txHash = doSend(sender.accountId, receiver.accountId, tokenAddress, false);
+        doReceive(receiver.accountId, txHash, tokenAddress);
+        break;
+    }
+    case 'withdraw': {
+        console.log(`[${label}] withdraw`);
+        const receiver = doAccount(false);
+        const txHash = doSend(sender.accountId, receiver.accountId, tokenAddress, false);
+        doReceive(receiver.accountId, txHash, tokenAddress, false);
+        doWithdraw(receiver.accountId, receiver.signerAddress, tokenAddress);
+        break;
+    }
+    case 'e2e':
+        runFullCycle(sender, label);
+        break;
+    default:
+        throw new Error(`지원하지 않는 TEST_MODE: ${MODE}`);
+    }
+}
+
 // --- 메인 ---
 export default function () {
-    if (MODE === 'e2e') {
-        const sender = e2eAccounts.length > 0
-            ? e2eAccounts[(__VU - 1) % e2eAccounts.length]
-            : { accountId: ZK_ACCOUNT_ID_01, signerAddress: SIGNER_ADDRESS, tokenAddress: TOKEN_ADDRESS };
-
-        runFullCycle(sender, `e2e:VU=${__VU}`);
-    }
+    const sender = getSender();
+    runMode(sender, `${MODE}:VU=${__VU}`);
 }

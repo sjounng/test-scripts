@@ -17,8 +17,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/config.sh"
-source "${SCRIPT_DIR}/lib.sh"
+source "${SCRIPT_DIR}/config/config.sh"
+source "${SCRIPT_DIR}/config/lib.sh"
 
 # ---- 인자 확인 ----
 CPU_CORES="${1:-}"
@@ -94,6 +94,284 @@ run_k6() {
 # ---- 다중 테스트 / E2E 공용 계정 사전 준비 ----
 # setup.sh 1~5단계 전체를 VU 수만큼 반복
 # 반환값: [{accountId, signerAddress}, ...] JSON 파일 경로
+prepare_single_account() {
+    local i="$1"
+    local count="$2"
+    exec 4>&1 1>&2
+
+    log_step "(${i}/${count}) ── 계정 세팅 시작 ──────────────────"
+
+    local idx="${RUN_ID}_e2e${i}"
+
+    # ============================================
+    # 1. 발행
+    # ============================================
+
+    # 1-1. 메인넷 등록 (chainId는 반복마다 고유하게)
+    call_api POST "${LIFECYCLE_BASE}/sc/mainnets" \
+        "$PLATFORM_CLIENT_ID" "$PLATFORM_CLIENT_SECRET" \
+        "{
+            \"mainnetName\": \"SDSMainNet_${idx}\",
+            \"mainnetType\": \"${MAINNET_TYPE}\",
+            \"endpoint\": \"${MAINNET_ENDPOINT}\",
+            \"chainId\": $(( (MAINNET_CHAIN_ID % 100000) * 100 + i ))
+        }"
+    if ! check_http_ok "메인넷 등록 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
+    local mainnet_id
+    mainnet_id=$(extract_json "$RESPONSE" '.data.mainnetId // .data.id // empty')
+    [[ -n "$mainnet_id" && "$mainnet_id" != "null" ]] || { log_warn "(${i}) mainnetId 없음, 건너뜀"; return 1; }
+
+    # 1-2. 발행 계획 등록
+    local rand
+    rand=$(cat /dev/urandom | LC_ALL=C tr -dc 'a-z0-9' | head -c 6)
+    call_api POST "${LIFECYCLE_BASE}/issuances" \
+        "$ISSUER_CLIENT_ID" "$ISSUER_CLIENT_SECRET" \
+        "{
+            \"mainnetId\": ${mainnet_id},
+            \"scName\": \"MySC_${rand}\",
+            \"scSymbol\": \"MS${rand}\",
+            \"scIssueAmount\": ${SC_ISSUE_AMOUNT},
+            \"scPlannedIssuanceDate\": \"${SC_PLANNED_DATE}\",
+            \"scIssueNote\": \"${SC_ISSUE_NOTE}\"
+        }"
+    if ! check_http_ok "발행 계획 등록 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
+    local sc_issue_id sc_id
+    sc_issue_id=$(extract_json "$RESPONSE" '.data.scIssueId')
+    sc_id=$(extract_json "$RESPONSE" '.data.scId')
+    [[ -n "$sc_issue_id" && "$sc_issue_id" != "null" ]] || { log_warn "(${i}) scIssueId 없음, 건너뜀"; return 1; }
+
+    # 1-3. 준비금 등록
+    call_api POST "${LIFECYCLE_BASE}/reserves" \
+        "$ISSUER_CLIENT_ID" "$ISSUER_CLIENT_SECRET" \
+        "{
+            \"scIssueId\": \"${sc_issue_id}\",
+            \"scId\": \"${sc_id}\",
+            \"reserve\": {
+                \"reserveNote\": \"${RESERVE_NOTE}\",
+                \"reserveOp\": [
+                    {
+                        \"reserveOpInstitutionName\": \"국민은행\",
+                        \"reserveOpType\": \"FiatDeposit\",
+                        \"reserveOpPeriodStart\": \"2025-10-22T09:00:00\",
+                        \"reserveOpPeriodEnd\": \"2026-03-31T23:59:59\",
+                        \"reserveOpNote\": \"유동성 확보\",
+                        \"reserveOpAmount\": ${RESERVE_FIAT_AMOUNT}
+                    },
+                    {
+                        \"reserveOpInstitutionName\": \"삼성자산운용 MMF\",
+                        \"reserveOpType\": \"Mmf\",
+                        \"reserveOpPeriodStart\": \"2025-10-22T09:00:00\",
+                        \"reserveOpPeriodEnd\": \"2026-03-31T23:59:59\",
+                        \"reserveOpNote\": \"단기 MMF 운용\",
+                        \"reserveOpAmount\": ${RESERVE_MMF_AMOUNT}
+                    }
+                ]
+            }
+        }"
+    if ! check_http_ok "준비금 등록 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
+    local reserve_id
+    reserve_id=$(extract_json "$RESPONSE" '.data.reserveId')
+
+    # 1-4. 준비금 승인
+    call_api PUT "${LIFECYCLE_BASE}/reserves/${reserve_id}/approval" \
+        "$ISSUER_CLIENT_ID" "$ISSUER_CLIENT_SECRET" \
+        '{"approval":"Approved"}'
+    if ! check_http_ok "준비금 승인 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
+
+    # 1-5. 발행 계획 승인
+    call_api PUT "${LIFECYCLE_BASE}/issuances/${sc_issue_id}/approval" \
+        "$ISSUER_CLIENT_ID" "$ISSUER_CLIENT_SECRET" \
+        '{"approval":"Approved"}'
+    if ! check_http_ok "발행 계획 승인 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
+
+    # 1-6. 발행 실행
+    if issue_issuance_with_retry "$sc_issue_id" "$i"; then
+        log_ok "발행 실행 (${i}) (HTTP ${HTTP_STATUS})"
+    else
+        check_http_ok "발행 실행 (${i})" || true
+        log_warn "(${i}) 건너뜀"
+        return 1
+    fi
+
+    # 1-7. token_address DB 조회
+    local token_address
+    token_address=$(query_db "SELECT token_address FROM stc_sc WHERE sc_id = ${sc_id} ORDER BY created_date DESC LIMIT 1;")
+    [[ -n "$token_address" && "$token_address" == 0x* ]] || { log_warn "(${i}) token_address 조회 실패, 건너뜀"; return 1; }
+    log_ok "(${i}) token_address: ${token_address}"
+
+    # ============================================
+    # 2. 개인사용자 관리
+    # ============================================
+
+    # 2-1. 개인사용자 추가
+    call_api POST "${LIFECYCLE_BASE}/users/individuals" \
+        "$ADMIN_CLIENT_ID" "$ADMIN_CLIENT_SECRET" \
+        "{
+            \"loginId\": \"e2u_${idx}\",
+            \"email\": \"e2u_${idx}@test.com\",
+            \"password\": \"${INDV1_PASSWORD}\",
+            \"name\": \"E2U${i}\",
+            \"phoneNumber\": \"010-0000-$(printf '%04d' "$i")\",
+            \"address\": \"서울시 성동구\",
+            \"detailAddress\": \"${i}호\",
+            \"zipCode\": \"01234\"
+        }"
+    if ! check_http_ok "사용자 추가 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
+    local user_id cli_id cli_secret
+    user_id=$(extract_json "$RESPONSE" '.data.userId')
+    cli_id=$(extract_json "$RESPONSE" '.data.longTokenClientId')
+    cli_secret=$(extract_json "$RESPONSE" '.data.longToken')
+
+    # 2-2. 사용자 승인
+    call_api PUT "${LIFECYCLE_BASE}/users/${user_id}/individuals/approval" \
+        "$PLATFORM_CLIENT_ID" "$PLATFORM_CLIENT_SECRET" \
+        '{"approval":"Approved"}'
+    if ! check_http_ok "사용자 승인 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
+
+    # 2-3. 포트폴리오 조회
+    call_api GET "${LIFECYCLE_BASE}/portfolios" \
+        "$PLATFORM_CLIENT_ID" "$PLATFORM_CLIENT_SECRET"
+    if ! check_http_ok "포트폴리오 조회 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
+    local portfolio_id
+    portfolio_id=$(extract_json "$RESPONSE" \
+        "[.data.content[]? | select(.ownerId == ${user_id} or .ownerId == \"${user_id}\")] | first | .portfolioId // empty")
+    [[ -n "$portfolio_id" && "$portfolio_id" != "null" ]] || { log_warn "(${i}) portfolioId 없음, 건너뜀"; return 1; }
+
+    # 2-4. 원화계좌 조회
+    call_api GET "${LIFECYCLE_BASE}/portfolios/${portfolio_id}/accounts" \
+        "$cli_id" "$cli_secret"
+    if ! check_http_ok "원화계좌 조회 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
+    local fiat_account_id
+    fiat_account_id=$(extract_json "$RESPONSE" \
+        '[.data.content[]? | select(.type == "Fiat")] | first | .accountId // empty')
+    [[ -n "$fiat_account_id" && "$fiat_account_id" != "null" ]] || { log_warn "(${i}) fiatAccountId 없음, 건너뜀"; return 1; }
+
+    # ============================================
+    # 3. 전환
+    # ============================================
+
+    # 3-1. 가상계좌 조회
+    call_api GET "${LIFECYCLE_BASE}/accounts/fiat/virtual-and-withdrawal" \
+        "$cli_id" "$cli_secret"
+    if ! check_http_ok "가상계좌 조회 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
+    local virtual_account
+    virtual_account=$(extract_json "$RESPONSE" \
+        '[.data.content[]? | select(.accountType == "Virtual")] | first | .accountNumber // empty')
+    [[ -n "$virtual_account" && "$virtual_account" != "null" ]] || { log_warn "(${i}) 가상계좌번호 없음, 건너뜀"; return 1; }
+
+    # 3-2. 원화 입금
+    call_api POST "${LIFECYCLE_BASE}/webhook/accounts/fiat/deposit" \
+        "$cli_id" "$cli_secret" \
+        "{
+            \"amount\": ${DEPOSIT_AMOUNT},
+            \"virtualAccountNumber\": \"${virtual_account}\",
+            \"bankCode\": \"099\"
+        }"
+    if ! check_http_ok "원화 입금 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
+
+    # 3-3. 온체인 매수 (FiatToOnchain)
+    call_api POST "${LIFECYCLE_BASE}/conversions" \
+        "$cli_id" "$cli_secret" \
+        "{
+            \"fiatAccountId\": ${fiat_account_id},
+            \"scAccountId\": null,
+            \"scId\": ${sc_id},
+            \"amount\": ${CONVERSION_AMOUNT},
+            \"conversionType\": \"FiatToOnchain\"
+        }"
+    if ! check_http_ok "온체인 매수 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
+
+    # 3-4. 포트폴리오 재조회 (코인계좌 확인)
+    call_api GET "${LIFECYCLE_BASE}/portfolios/${portfolio_id}/accounts" \
+        "$cli_id" "$cli_secret"
+    if ! check_http_ok "포트폴리오 재조회 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
+    local sc_account_id
+    sc_account_id=$(extract_json "$RESPONSE" \
+        '[.data.content[]? | select(.type == "Sc" or .type == "SC" or .type == "sc")] | first | .accountId // empty')
+    [[ -n "$sc_account_id" && "$sc_account_id" != "null" ]] || { log_warn "(${i}) scAccountId 없음, 건너뜀"; return 1; }
+
+    # 3-5. 코인 계좌 조회 (지갑주소)
+    call_api GET "${LIFECYCLE_BASE}/accounts/sc/${sc_account_id}" \
+        "$cli_id" "$cli_secret"
+    if ! check_http_ok "코인계좌 조회 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
+    local wallet_address
+    wallet_address=$(extract_json "$RESPONSE" '.data.scWalletAddress // .data.walletAddress // empty')
+    [[ -n "$wallet_address" && "$wallet_address" != "null" ]] || { log_warn "(${i}) 지갑주소 없음, 건너뜀"; return 1; }
+
+    # ============================================
+    # 4. ZK 비밀계좌 생성
+    # ============================================
+    call_api POST "${SDS_ZK_BASE}/accounts" \
+        "$ADMIN_CLIENT_ID" "$ADMIN_CLIENT_SECRET"
+    if ! check_http_ok "ZK 계좌 생성 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
+    local zk_account_id signer_address
+    zk_account_id=$(extract_json "$RESPONSE" '.data.accountId // empty')
+    signer_address=$(extract_json "$RESPONSE" '.data.signerAddress // empty')
+    [[ -n "$zk_account_id" && "$zk_account_id" != "null" ]] || { log_warn "(${i}) ZK accountId 없음, 건너뜀"; return 1; }
+
+    # ============================================
+    # 5. 전송 (On to On)
+    # ============================================
+
+    # 5-1. 코인 계좌 재조회
+    call_api GET "${LIFECYCLE_BASE}/accounts/sc/${sc_account_id}" \
+        "$cli_id" "$cli_secret"
+    if ! check_http_ok "코인계좌 재조회 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
+    wallet_address=$(extract_json "$RESPONSE" '.data.scWalletAddress // .data.walletAddress // empty')
+    [[ -n "$wallet_address" && "$wallet_address" != "null" ]] || { log_warn "(${i}) 지갑주소 재조회 실패, 건너뜀"; return 1; }
+
+    # 5-2. SC 토큰 → ZK signer address 전송
+    call_api POST "${LIFECYCLE_BASE}/transfers" \
+        "$cli_id" "$cli_secret" \
+        "{
+            \"fromScWalletAddress\": \"${wallet_address}\",
+            \"toScWalletAddress\": \"${signer_address}\",
+            \"scId\": ${sc_id},
+            \"amount\": ${TRANSFER_AMOUNT},
+            \"transferType\": \"OnchainToOnchain\"
+        }"
+    if ! check_http_ok "SC 전송 (${i})"; then log_warn "(${i}) SC 전송 실패, 건너뜀"; return 1; fi
+
+    jq -cn \
+        --arg accountId "$zk_account_id" \
+        --arg signerAddress "$signer_address" \
+        --arg tokenAddress "$token_address" \
+        '{accountId: $accountId, signerAddress: $signerAddress, tokenAddress: $tokenAddress}' >&4
+    log_ok "(${i}/${count}) 완료 → accountId: ${zk_account_id}"
+}
+
+issue_issuance_with_retry() {
+    local sc_issue_id="$1"
+    local worker_index="$2"
+    local attempt
+    local max_attempts=6
+    local delay=1
+
+    for (( attempt=1; attempt<=max_attempts; attempt++ )); do
+        call_api PUT "${LIFECYCLE_BASE}/issuances/${sc_issue_id}/issue" \
+            "$ISSUER_CLIENT_ID" "$ISSUER_CLIENT_SECRET" \
+            ""
+
+        if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "201" ]]; then
+            return 0
+        fi
+
+        if [[ "$HTTP_STATUS" != "302" && "$HTTP_STATUS" != "409" && "$HTTP_STATUS" != "423" && "$HTTP_STATUS" != "429" && "$HTTP_STATUS" != "500" && "$HTTP_STATUS" != "502" && "$HTTP_STATUS" != "503" ]]; then
+            return 1
+        fi
+
+        if (( attempt == max_attempts )); then
+            return 1
+        fi
+
+        log_warn "(${worker_index}) 발행 실행 재시도 대기 (${attempt}/${max_attempts}, HTTP ${HTTP_STATUS}, ${delay}s)"
+        sleep "$delay"
+        if (( delay < 5 )); then
+            delay=$(( delay + 1 ))
+        fi
+    done
+}
+
 prepare_accounts() {
     local count="$1"
     local accounts_file
@@ -104,254 +382,42 @@ prepare_accounts() {
 
     log_header "E2E 계정 사전 준비 (${count}개) — setup.sh 1~5단계"
 
-    local entries=()
+    local tmp_dir
+    tmp_dir=$(mktemp -d "/tmp/accounts_prepare_${TIMESTAMP}_XXXXXX")
 
+    local success_count=0
+    local had_failures=0
+    local i
     for (( i=1; i<=count; i++ )); do
-        log_step "(${i}/${count}) ── 계정 세팅 시작 ──────────────────"
-
-        local idx="${RUN_ID}_e2e${i}"
-
-        # ============================================
-        # 1. 발행
-        # ============================================
-
-        # 1-1. 메인넷 등록 (chainId는 반복마다 고유하게)
-        call_api POST "${LIFECYCLE_BASE}/sc/mainnets" \
-            "$PLATFORM_CLIENT_ID" "$PLATFORM_CLIENT_SECRET" \
-            "{
-                \"mainnetName\": \"SDSMainNet_${idx}\",
-                \"mainnetType\": \"${MAINNET_TYPE}\",
-                \"endpoint\": \"${MAINNET_ENDPOINT}\",
-                \"chainId\": $(( (MAINNET_CHAIN_ID % 100000) * 100 + i ))
-            }"
-        if ! check_http_ok "메인넷 등록 (${i})"; then log_warn "(${i}) 건너뜀"; continue; fi
-        local mainnet_id
-        mainnet_id=$(extract_json "$RESPONSE" '.data.mainnetId // .data.id // empty')
-        [[ -n "$mainnet_id" && "$mainnet_id" != "null" ]] || { log_warn "(${i}) mainnetId 없음, 건너뜀"; continue; }
-
-        # 1-2. 발행 계획 등록
-        local rand
-        rand=$(cat /dev/urandom | LC_ALL=C tr -dc 'a-z0-9' | head -c 6)
-        call_api POST "${LIFECYCLE_BASE}/issuances" \
-            "$ISSUER_CLIENT_ID" "$ISSUER_CLIENT_SECRET" \
-            "{
-                \"mainnetId\": ${mainnet_id},
-                \"scName\": \"MySC_${rand}\",
-                \"scSymbol\": \"MS${rand}\",
-                \"scIssueAmount\": ${SC_ISSUE_AMOUNT},
-                \"scPlannedIssuanceDate\": \"${SC_PLANNED_DATE}\",
-                \"scIssueNote\": \"${SC_ISSUE_NOTE}\"
-            }"
-        if ! check_http_ok "발행 계획 등록 (${i})"; then log_warn "(${i}) 건너뜀"; continue; fi
-        local sc_issue_id sc_id
-        sc_issue_id=$(extract_json "$RESPONSE" '.data.scIssueId')
-        sc_id=$(extract_json "$RESPONSE" '.data.scId')
-        [[ -n "$sc_issue_id" && "$sc_issue_id" != "null" ]] || { log_warn "(${i}) scIssueId 없음, 건너뜀"; continue; }
-
-        # 1-3. 준비금 등록
-        call_api POST "${LIFECYCLE_BASE}/reserves" \
-            "$ISSUER_CLIENT_ID" "$ISSUER_CLIENT_SECRET" \
-            "{
-                \"scIssueId\": \"${sc_issue_id}\",
-                \"scId\": \"${sc_id}\",
-                \"reserve\": {
-                    \"reserveNote\": \"${RESERVE_NOTE}\",
-                    \"reserveOp\": [
-                        {
-                            \"reserveOpInstitutionName\": \"국민은행\",
-                            \"reserveOpType\": \"FiatDeposit\",
-                            \"reserveOpPeriodStart\": \"2025-10-22T09:00:00\",
-                            \"reserveOpPeriodEnd\": \"2026-03-31T23:59:59\",
-                            \"reserveOpNote\": \"유동성 확보\",
-                            \"reserveOpAmount\": ${RESERVE_FIAT_AMOUNT}
-                        },
-                        {
-                            \"reserveOpInstitutionName\": \"삼성자산운용 MMF\",
-                            \"reserveOpType\": \"Mmf\",
-                            \"reserveOpPeriodStart\": \"2025-10-22T09:00:00\",
-                            \"reserveOpPeriodEnd\": \"2026-03-31T23:59:59\",
-                            \"reserveOpNote\": \"단기 MMF 운용\",
-                            \"reserveOpAmount\": ${RESERVE_MMF_AMOUNT}
-                        }
-                    ]
-                }
-            }"
-        if ! check_http_ok "준비금 등록 (${i})"; then log_warn "(${i}) 건너뜀"; continue; fi
-        local reserve_id
-        reserve_id=$(extract_json "$RESPONSE" '.data.reserveId')
-
-        # 1-4. 준비금 승인
-        call_api PUT "${LIFECYCLE_BASE}/reserves/${reserve_id}/approval" \
-            "$ISSUER_CLIENT_ID" "$ISSUER_CLIENT_SECRET" \
-            '{"approval":"Approved"}'
-        if ! check_http_ok "준비금 승인 (${i})"; then log_warn "(${i}) 건너뜀"; continue; fi
-
-        # 1-5. 발행 계획 승인
-        call_api PUT "${LIFECYCLE_BASE}/issuances/${sc_issue_id}/approval" \
-            "$ISSUER_CLIENT_ID" "$ISSUER_CLIENT_SECRET" \
-            '{"approval":"Approved"}'
-        if ! check_http_ok "발행 계획 승인 (${i})"; then log_warn "(${i}) 건너뜀"; continue; fi
-
-        # 1-6. 발행 실행
-        call_api PUT "${LIFECYCLE_BASE}/issuances/${sc_issue_id}/issue" \
-            "$ISSUER_CLIENT_ID" "$ISSUER_CLIENT_SECRET" \
-            ""
-        if ! check_http_ok "발행 실행 (${i})"; then log_warn "(${i}) 건너뜀"; continue; fi
-
-        # 1-7. token_address DB 조회
-        local token_address
-        token_address=$(query_db "SELECT token_address FROM stc_sc WHERE sc_id = ${sc_id} ORDER BY created_date DESC LIMIT 1;")
-        [[ -n "$token_address" && "$token_address" == 0x* ]] || { log_warn "(${i}) token_address 조회 실패, 건너뜀"; continue; }
-        log_ok "(${i}) token_address: ${token_address}"
-
-        # ============================================
-        # 2. 개인사용자 관리
-        # ============================================
-
-        # 2-1. 개인사용자 추가
-        call_api POST "${LIFECYCLE_BASE}/users/individuals" \
-            "$ADMIN_CLIENT_ID" "$ADMIN_CLIENT_SECRET" \
-            "{
-                \"loginId\": \"e2u_${idx}\",
-                \"email\": \"e2u_${idx}@test.com\",
-                \"password\": \"${INDV1_PASSWORD}\",
-                \"name\": \"E2U${i}\",
-                \"phoneNumber\": \"010-0000-$(printf '%04d' $i)\",
-                \"address\": \"서울시 성동구\",
-                \"detailAddress\": \"${i}호\",
-                \"zipCode\": \"01234\"
-            }"
-        if ! check_http_ok "사용자 추가 (${i})"; then log_warn "(${i}) 건너뜀"; continue; fi
-        local user_id cli_id cli_secret
-        user_id=$(extract_json "$RESPONSE" '.data.userId')
-        cli_id=$(extract_json "$RESPONSE" '.data.longTokenClientId')
-        cli_secret=$(extract_json "$RESPONSE" '.data.longToken')
-
-        # 2-2. 사용자 승인
-        call_api PUT "${LIFECYCLE_BASE}/users/${user_id}/individuals/approval" \
-            "$PLATFORM_CLIENT_ID" "$PLATFORM_CLIENT_SECRET" \
-            '{"approval":"Approved"}'
-        if ! check_http_ok "사용자 승인 (${i})"; then log_warn "(${i}) 건너뜀"; continue; fi
-
-        # 2-3. 포트폴리오 조회
-        call_api GET "${LIFECYCLE_BASE}/portfolios" \
-            "$PLATFORM_CLIENT_ID" "$PLATFORM_CLIENT_SECRET"
-        if ! check_http_ok "포트폴리오 조회 (${i})"; then log_warn "(${i}) 건너뜀"; continue; fi
-        local portfolio_id
-        portfolio_id=$(extract_json "$RESPONSE" \
-            "[.data.content[]? | select(.ownerId == ${user_id} or .ownerId == \"${user_id}\")] | first | .portfolioId // empty")
-        [[ -n "$portfolio_id" && "$portfolio_id" != "null" ]] || { log_warn "(${i}) portfolioId 없음, 건너뜀"; continue; }
-
-        # 2-4. 원화계좌 조회
-        call_api GET "${LIFECYCLE_BASE}/portfolios/${portfolio_id}/accounts" \
-            "$cli_id" "$cli_secret"
-        if ! check_http_ok "원화계좌 조회 (${i})"; then log_warn "(${i}) 건너뜀"; continue; fi
-        local fiat_account_id
-        fiat_account_id=$(extract_json "$RESPONSE" \
-            '[.data.content[]? | select(.type == "Fiat")] | first | .accountId // empty')
-        [[ -n "$fiat_account_id" && "$fiat_account_id" != "null" ]] || { log_warn "(${i}) fiatAccountId 없음, 건너뜀"; continue; }
-
-        # ============================================
-        # 3. 전환
-        # ============================================
-
-        # 3-1. 가상계좌 조회
-        call_api GET "${LIFECYCLE_BASE}/accounts/fiat/virtual-and-withdrawal" \
-            "$cli_id" "$cli_secret"
-        if ! check_http_ok "가상계좌 조회 (${i})"; then log_warn "(${i}) 건너뜀"; continue; fi
-        local virtual_account
-        virtual_account=$(extract_json "$RESPONSE" \
-            '[.data.content[]? | select(.accountType == "Virtual")] | first | .accountNumber // empty')
-        [[ -n "$virtual_account" && "$virtual_account" != "null" ]] || { log_warn "(${i}) 가상계좌번호 없음, 건너뜀"; continue; }
-
-        # 3-2. 원화 입금
-        call_api POST "${LIFECYCLE_BASE}/webhook/accounts/fiat/deposit" \
-            "$cli_id" "$cli_secret" \
-            "{
-                \"amount\": ${DEPOSIT_AMOUNT},
-                \"virtualAccountNumber\": \"${virtual_account}\",
-                \"bankCode\": \"099\"
-            }"
-        if ! check_http_ok "원화 입금 (${i})"; then log_warn "(${i}) 건너뜀"; continue; fi
-
-        # 3-3. 온체인 매수 (FiatToOnchain)
-        call_api POST "${LIFECYCLE_BASE}/conversions" \
-            "$cli_id" "$cli_secret" \
-            "{
-                \"fiatAccountId\": ${fiat_account_id},
-                \"scAccountId\": null,
-                \"scId\": ${sc_id},
-                \"amount\": ${CONVERSION_AMOUNT},
-                \"conversionType\": \"FiatToOnchain\"
-            }"
-        if ! check_http_ok "온체인 매수 (${i})"; then log_warn "(${i}) 건너뜀"; continue; fi
-
-        # 3-4. 포트폴리오 재조회 (코인계좌 확인)
-        call_api GET "${LIFECYCLE_BASE}/portfolios/${portfolio_id}/accounts" \
-            "$cli_id" "$cli_secret"
-        if ! check_http_ok "포트폴리오 재조회 (${i})"; then log_warn "(${i}) 건너뜀"; continue; fi
-        local sc_account_id
-        sc_account_id=$(extract_json "$RESPONSE" \
-            '[.data.content[]? | select(.type == "Sc" or .type == "SC" or .type == "sc")] | first | .accountId // empty')
-        [[ -n "$sc_account_id" && "$sc_account_id" != "null" ]] || { log_warn "(${i}) scAccountId 없음, 건너뜀"; continue; }
-
-        # 3-5. 코인 계좌 조회 (지갑주소)
-        call_api GET "${LIFECYCLE_BASE}/accounts/sc/${sc_account_id}" \
-            "$cli_id" "$cli_secret"
-        if ! check_http_ok "코인계좌 조회 (${i})"; then log_warn "(${i}) 건너뜀"; continue; fi
-        local wallet_address
-        wallet_address=$(extract_json "$RESPONSE" '.data.scWalletAddress // .data.walletAddress // empty')
-        [[ -n "$wallet_address" && "$wallet_address" != "null" ]] || { log_warn "(${i}) 지갑주소 없음, 건너뜀"; continue; }
-
-        # ============================================
-        # 4. ZK 비밀계좌 생성
-        # ============================================
-        call_api POST "${SDS_ZK_BASE}/accounts" \
-            "$ADMIN_CLIENT_ID" "$ADMIN_CLIENT_SECRET"
-        if ! check_http_ok "ZK 계좌 생성 (${i})"; then log_warn "(${i}) 건너뜀"; continue; fi
-        local zk_account_id signer_address
-        zk_account_id=$(extract_json "$RESPONSE" '.data.accountId // empty')
-        signer_address=$(extract_json "$RESPONSE" '.data.signerAddress // empty')
-        [[ -n "$zk_account_id" && "$zk_account_id" != "null" ]] || { log_warn "(${i}) ZK accountId 없음, 건너뜀"; continue; }
-
-        # ============================================
-        # 5. 전송 (On to On)
-        # ============================================
-
-        # 5-1. 코인 계좌 재조회
-        call_api GET "${LIFECYCLE_BASE}/accounts/sc/${sc_account_id}" \
-            "$cli_id" "$cli_secret"
-        if ! check_http_ok "코인계좌 재조회 (${i})"; then log_warn "(${i}) 건너뜀"; continue; fi
-        wallet_address=$(extract_json "$RESPONSE" '.data.scWalletAddress // .data.walletAddress // empty')
-        [[ -n "$wallet_address" && "$wallet_address" != "null" ]] || { log_warn "(${i}) 지갑주소 재조회 실패, 건너뜀"; continue; }
-
-        # 5-2. SC 토큰 → ZK signer address 전송
-        call_api POST "${LIFECYCLE_BASE}/transfers" \
-            "$cli_id" "$cli_secret" \
-            "{
-                \"fromScWalletAddress\": \"${wallet_address}\",
-                \"toScWalletAddress\": \"${signer_address}\",
-                \"scId\": ${sc_id},
-                \"amount\": ${TRANSFER_AMOUNT},
-                \"transferType\": \"OnchainToOnchain\"
-            }"
-        if ! check_http_ok "SC 전송 (${i})"; then log_warn "(${i}) SC 전송 실패, 건너뜀"; continue; fi
-
-        entries+=("{\"accountId\":\"${zk_account_id}\",\"signerAddress\":\"${signer_address}\",\"tokenAddress\":\"${token_address}\"}")
-        log_ok "(${i}/${count}) 완료 → accountId: ${zk_account_id}"
+        local out_file
+        out_file="${tmp_dir}/$(printf '%05d' "$i").json"
+        if ! prepare_single_account "$i" "$count" 3> "$out_file"; then
+            rm -f "$out_file"
+            had_failures=1
+            continue
+        fi
+        if [[ -s "$out_file" ]]; then
+            success_count=$(( success_count + 1 ))
+        else
+            rm -f "$out_file"
+            had_failures=1
+        fi
     done
 
-    if [[ ${#entries[@]} -eq 0 ]]; then
+    if [[ "$success_count" == "0" ]]; then
         log_fail "E2E 계정 준비 전체 실패"
+        rm -rf "$tmp_dir"
         exec 1>&3 3>&-
         return 1
     fi
 
-    local joined
-    joined=$(IFS=,; echo "${entries[*]}")
-    echo "[${joined}]" > "$accounts_file"
+    jq -s '.' "${tmp_dir}"/*.json > "$accounts_file"
+    rm -rf "$tmp_dir"
 
-    log_ok "계정 ${#entries[@]}개 준비 완료 → ${accounts_file}"
+    if (( had_failures )); then
+        log_warn "일부 계정 준비는 실패했지만 성공한 ${success_count}개 계정을 사용합니다."
+    fi
+    log_ok "계정 ${success_count}개 준비 완료 → ${accounts_file}"
 
     exec 1>&3 3>&-
     echo "$accounts_file"
@@ -504,9 +570,8 @@ fi
 # ============================================
 # 9 & 10. 다중 테스트 + E2E 테스트
 #   - VU 수만큼 sender 계정 사전 준비 (한 번만)
-#   - 각 VU는 자신의 계정으로 풀 사이클 반복:
-#     approve → deposit → account(acct2) → send → receive → withdraw
-#   - 한 번의 k6 실행 결과에서 API별 메트릭 + 전체 메트릭 추출
+#   - multi: API 단계를 순차 배리어 방식으로 실행
+#   - e2e: 각 VU가 자신의 계정으로 풀 사이클 반복
 # ============================================
 
 # 다중/E2E 테스트는 계정 사전 준비가 필요
@@ -532,24 +597,22 @@ if [[ "$SECTION" == "multi" || "$SECTION" == "all" ]]; then
     } >> "$RESULT_FILE"
 
     for vu in "${VUS_LIST[@]}"; do
-        log_step "다중 테스트 VU=${vu} 실행 중 (풀 사이클, 계정 ${vu}개)..."
-        tmp=$(run_k6 "e2e" "$vu" --duration "$MULTI_DURATION" "${SHARED_ACCOUNTS_FILE:-}")
-        log_ok "VU=${vu} k6 완료, 메트릭 추출 중..."
-
-        tps=$(rate_val "$tmp")
-        er=$(error_rate "$tmp")
-
         for api in approve deposit account send receive withdraw; do
+            log_step "다중 테스트 VU=${vu} 단계 실행 중: ${api}"
+            tmp=$(run_k6 "$api" "$vu" --duration "$MULTI_DURATION" "${SHARED_ACCOUNTS_FILE:-}")
+            log_ok "VU=${vu} ${api} 단계 완료, 메트릭 추출 중..."
+
+            tps=$(rate_val "$tmp")
+            er=$(error_rate "$tmp")
             avg=$(trend_val "$tmp" "api_${api}" "avg")
             p95=$(trend_val "$tmp" "api_${api}" "p(95)")
             p99=$(trend_val "$tmp" "api_${api}" "p(99)")
             log_info "  [${api}] avg=$(fmt_ms "$avg") p95=$(fmt_ms "$p95") p99=$(fmt_ms "$p99")"
             echo "| ${api} | ${CPU_CORES} | ${vu} | $(fmt_tps "$tps") | $(fmt_ms "$avg") | $(fmt_ms "$p95") | $(fmt_ms "$p99") | ${er}% |" \
                 >> "$RESULT_FILE"
+            rm -f "$tmp"
         done
-
-        rm -f "$tmp"
-        log_ok "다중 테스트 VU=${vu} 완료"
+        log_ok "다중 테스트 VU=${vu} 완료 (단계별 순차 실행)"
     done
 
     echo "" >> "$RESULT_FILE"

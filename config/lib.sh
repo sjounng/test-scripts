@@ -185,8 +185,8 @@ die() {
 init_script() {
     local script_name="$1"
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)"
-    source "${SCRIPT_DIR}/config.sh"
-    source "${SCRIPT_DIR}/lib.sh" 2>/dev/null  # 이미 로드됨, 무시
+    source "${SCRIPT_DIR}/config/config.sh"
+    source "${SCRIPT_DIR}/config/lib.sh" 2>/dev/null  # 이미 로드됨, 무시
     STATE_FILE="${SCRIPT_DIR}/.state"
     load_state
     log_header "$script_name"

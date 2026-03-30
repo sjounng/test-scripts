@@ -19,8 +19,8 @@
 # ============================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/config.sh"
-source "${SCRIPT_DIR}/lib.sh"
+source "${SCRIPT_DIR}/config/config.sh"
+source "${SCRIPT_DIR}/config/lib.sh"
 
 if [ ! -f .state ]; then
     log_warn ".state 파일이 없습니다. 환경 변수가 비어있을 수 있습니다."

@@ -4,8 +4,8 @@
 # ============================================
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/config.sh"
-source "${SCRIPT_DIR}/lib.sh"
+source "${SCRIPT_DIR}/config/config.sh"
+source "${SCRIPT_DIR}/config/lib.sh"
 
 # ============================================
 # 1. 발행 [최초발행]
