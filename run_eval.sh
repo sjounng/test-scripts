@@ -609,13 +609,13 @@ if [[ "$SECTION" == "multi" || "$SECTION" == "all" ]]; then
         echo "| --- | --- | --- | --- | --- | --- | --- | --- |"
     } >> "$RESULT_FILE"
 
-    for api in account approve deposit send receive withdraw; do
-      for vu in "${VUS_LIST[@]}"; do
-            local_iters=$(( MULTI_ITERATIONS * vu ))
-            log_step "다중 테스트 VU=${vu} 실행 중: ${api}"
-            tmp=$(run_k6 "$api" "$vu" --iterations "$local_iters" "${SHARED_ACCOUNTS_FILE:-}")
-            log_ok "VU=${vu} ${api} 완료, 메트릭 추출 중..."
+    for vu in "${VUS_LIST[@]}"; do
+        local_iters=$(( MULTI_ITERATIONS * vu ))
+        log_step "다중 테스트 VU=${vu} barrier 실행 중 (VU당 ${MULTI_ITERATIONS}회)"
+        tmp=$(run_k6 "barrier" "$vu" --iterations "$local_iters" "${SHARED_ACCOUNTS_FILE:-}")
+        log_ok "VU=${vu} barrier 완료, 메트릭 추출 중..."
 
+        for api in account approve deposit send receive withdraw; do
             tps=$(rate_val "$tmp" "api_${api}_count")
             er=$(error_rate "$tmp")
             avg=$(trend_val "$tmp" "api_${api}" "avg")
@@ -624,9 +624,9 @@ if [[ "$SECTION" == "multi" || "$SECTION" == "all" ]]; then
             log_info "  [${api}] avg=$(fmt_ms "$avg") p95=$(fmt_ms "$p95") p99=$(fmt_ms "$p99")"
             echo "| ${api} | ${CPU_CORES} | ${vu} | $(fmt_tps "$tps") | $(fmt_ms "$avg") | $(fmt_ms "$p95") | $(fmt_ms "$p99") | ${er}% |" \
                 >> "$RESULT_FILE"
-            rm -f "$tmp"
         done
-        log_ok "다중 테스트 ${api} 완료"
+        rm -f "$tmp"
+        log_ok "다중 테스트 VU=${vu} 완료"
     done
 
     echo "" >> "$RESULT_FILE"
@@ -648,8 +648,9 @@ if [[ "$SECTION" == "e2e" || "$SECTION" == "all" ]]; then
     E2E_SCENARIO="approve > deposit > account > send > receive > withdraw"
 
     for vu in "${VUS_LIST[@]}"; do
-        log_step "E2E VU=${vu} 실행 중 (계정 ${vu}개)..."
-        tmp=$(run_k6 "e2e" "$vu" --duration "$MULTI_DURATION" "${SHARED_ACCOUNTS_FILE:-}")
+        local_iters=$(( MULTI_ITERATIONS * vu ))
+        log_step "E2E VU=${vu} 실행 중 (계정 ${vu}개, ${local_iters}회)..."
+        tmp=$(run_k6 "e2e" "$vu" --iterations "$local_iters" "${SHARED_ACCOUNTS_FILE:-}")
         log_ok "VU=${vu} k6 완료, E2E 메트릭 추출 중..."
 
         tps=$(rate_val "$tmp")
