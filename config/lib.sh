@@ -184,10 +184,10 @@ die() {
 # 스크립트 초기화 (각 스크립트 시작부에서 호출)
 init_script() {
     local script_name="$1"
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)"
-    source "${SCRIPT_DIR}/config/config.sh"
-    source "${SCRIPT_DIR}/config/lib.sh" 2>/dev/null  # 이미 로드됨, 무시
-    STATE_FILE="${SCRIPT_DIR}/.state"
+    local _caller_dir
+    _caller_dir="$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)"
+    source "${_caller_dir}/config/config.sh"
+    source "${_caller_dir}/config/lib.sh" 2>/dev/null  # 이미 로드됨, 무시
     load_state
     log_header "$script_name"
     _SCRIPT_START=$(date +%s)

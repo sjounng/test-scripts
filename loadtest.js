@@ -1,6 +1,6 @@
 import http from 'k6/http';
 import { check } from 'k6';
-import { Trend } from 'k6/metrics';
+import { Counter, Trend } from 'k6/metrics';
 
 const SDS_ZK_BASE = __ENV.SDS_ZK_BASE || 'http://localhost:8080/rest/zktransfer';
 const SDS_CLIENT_ID = __ENV.SDS_CLIENT_ID || 'ADMIN_TOKEN';
@@ -23,6 +23,13 @@ const depositDuration = new Trend('api_deposit', true);
 const sendDuration    = new Trend('api_send', true);
 const receiveDuration = new Trend('api_receive', true);
 const withdrawDuration = new Trend('api_withdraw', true);
+
+const accountCount = new Counter('api_account_count');
+const approveCount = new Counter('api_approve_count');
+const depositCount = new Counter('api_deposit_count');
+const sendCount    = new Counter('api_send_count');
+const receiveCount = new Counter('api_receive_count');
+const withdrawCount = new Counter('api_withdraw_count');
 
 export const options = {
     summaryTrendStats: ['avg', 'min', 'max', 'p(95)', 'p(99)'],
@@ -62,6 +69,7 @@ function doAccount(trackMetric = true) {
     });
     if (trackMetric) {
         accountDuration.add(res.timings.duration);
+        accountCount.add(1);
     }
     check(res, { '[account] status 200': bodyOk });
     if (!bodyOk(res)) {
@@ -82,6 +90,7 @@ function doApprove(accountId, tokenAddress, trackMetric = true) {
     }), { headers: sdsHeaders(), tags: { api: 'approve' } });
     if (trackMetric) {
         approveDuration.add(res.timings.duration);
+        approveCount.add(1);
     }
     check(res, { '[approve] status 200': bodyOk });
     if (!bodyOk(res)) {
@@ -104,6 +113,7 @@ function doDeposit(accountId, tokenAddress, trackMetric = true) {
     }), { headers: sdsHeaders(), tags: { api: 'deposit' } });
     if (trackMetric) {
         depositDuration.add(res.timings.duration);
+        depositCount.add(1);
     }
     check(res, { '[deposit] status 200': bodyOk });
     if (!bodyOk(res)) {
@@ -121,6 +131,7 @@ function doSend(fromAccountId, toAccountId, tokenAddress, trackMetric = true) {
     }), { headers: sdsHeaders(), tags: { api: 'send' } });
     if (trackMetric) {
         sendDuration.add(res.timings.duration);
+        sendCount.add(1);
     }
     check(res, { '[send] status 200': bodyOk });
     if (!bodyOk(res)) {
@@ -138,6 +149,7 @@ function doReceive(toAccountId, txHash, tokenAddress, trackMetric = true) {
     }), { headers: sdsHeaders(), tags: { api: 'receive' } });
     if (trackMetric) {
         receiveDuration.add(res.timings.duration);
+        receiveCount.add(1);
     }
     check(res, { '[receive] status 200': bodyOk });
     if (!bodyOk(res)) {
@@ -155,6 +167,7 @@ function doWithdraw(fromAccountId, eoaRecv, tokenAddress, trackMetric = true) {
     }), { headers: sdsHeaders(), tags: { api: 'withdraw' } });
     if (trackMetric) {
         withdrawDuration.add(res.timings.duration);
+        withdrawCount.add(1);
     }
     check(res, { '[withdraw] status 200': bodyOk });
     if (!bodyOk(res)) {
@@ -214,16 +227,21 @@ function runMode(sender, label) {
         break;
     case 'deposit':
         console.log(`[${label}] deposit`);
+        doApprove(sender.accountId, tokenAddress, false);
         doDeposit(sender.accountId, tokenAddress);
         break;
     case 'send': {
         console.log(`[${label}] send`);
+        doApprove(sender.accountId, tokenAddress, false);
+        doDeposit(sender.accountId, tokenAddress, false);
         const receiver = doAccount(false);
         doSend(sender.accountId, receiver.accountId, tokenAddress);
         break;
     }
     case 'receive': {
         console.log(`[${label}] receive`);
+        doApprove(sender.accountId, tokenAddress, false);
+        doDeposit(sender.accountId, tokenAddress, false);
         const receiver = doAccount(false);
         const txHash = doSend(sender.accountId, receiver.accountId, tokenAddress, false);
         doReceive(receiver.accountId, txHash, tokenAddress);
@@ -231,6 +249,8 @@ function runMode(sender, label) {
     }
     case 'withdraw': {
         console.log(`[${label}] withdraw`);
+        doApprove(sender.accountId, tokenAddress, false);
+        doDeposit(sender.accountId, tokenAddress, false);
         const receiver = doAccount(false);
         const txHash = doSend(sender.accountId, receiver.accountId, tokenAddress, false);
         doReceive(receiver.accountId, txHash, tokenAddress, false);

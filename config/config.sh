@@ -30,7 +30,8 @@ LC_DB_PASS="root"
 LC_DB_NAME="lego"
 
 # --- 성능 테스트를 위한 고유 실행 ID ---
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "${CONFIG_DIR}/.." && pwd)"
 STATE_FILE="${SCRIPT_DIR}/.state"
 
 if [[ -z "${RUN_ID:-}" ]]; then
@@ -82,4 +83,4 @@ ZK_SEND_AMOUNT=10
 ZK_WITHDRAW_AMOUNT=10
 
 # --- 상태 파일 경로 ---
-# SCRIPT_DIR과 STATE_FILE은 위에서 이미 정의됨
+# CONFIG_DIR, SCRIPT_DIR, STATE_FILE은 위에서 이미 정의됨

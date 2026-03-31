@@ -49,7 +49,7 @@ SC_ID=$(grep "^SC_ID=" "${SCRIPT_DIR}/.state" | cut -d'=' -f2 || echo "")
 
 # ---- 설정 ----
 SINGLE_ITERATIONS=10
-MULTI_DURATION="30s"
+MULTI_ITERATIONS=10
 VUS_LIST=(10 20 30)
 APIS=(account approve deposit send receive withdraw)
 
@@ -71,22 +71,35 @@ run_k6() {
     local tmp_out
     tmp_out=$(mktemp /tmp/k6_out_XXXXXX)
 
-    local -a accounts_env=()
+    local accounts_arg=""
     if [[ -n "$accounts_file" ]]; then
-        accounts_env=(-e "ACCOUNTS_FILE=${accounts_file}")
+        accounts_arg="ACCOUNTS_FILE=${accounts_file}"
     fi
 
-    k6 run \
-        -e SDS_ZK_BASE="http://localhost:8080/rest/zktransfer" \
-        -e TOKEN_ADDRESS="$TOKEN_ADDRESS" \
-        -e ZK_ACCOUNT_ID_01="$ZK_ACCOUNT_ID_01" \
-        -e ZK_ACCOUNT_ID_02="$ZK_ACCOUNT_ID_02" \
-        -e SIGNER_ADDRESS="$SIGNER_ADDRESS" \
-        -e TEST_MODE="$mode" \
-        "${accounts_env[@]}" \
-        --vus "$vus" \
-        "$count_flag" "$count_val" \
-        "${SCRIPT_DIR}/loadtest.js" > "$tmp_out" || true
+    if [[ -n "$accounts_arg" ]]; then
+        k6 run \
+            -e SDS_ZK_BASE="http://localhost:8080/rest/zktransfer" \
+            -e TOKEN_ADDRESS="$TOKEN_ADDRESS" \
+            -e ZK_ACCOUNT_ID_01="$ZK_ACCOUNT_ID_01" \
+            -e ZK_ACCOUNT_ID_02="$ZK_ACCOUNT_ID_02" \
+            -e SIGNER_ADDRESS="$SIGNER_ADDRESS" \
+            -e TEST_MODE="$mode" \
+            -e "$accounts_arg" \
+            --vus "$vus" \
+            "$count_flag" "$count_val" \
+            "${SCRIPT_DIR}/loadtest.js" > "$tmp_out" || true
+    else
+        k6 run \
+            -e SDS_ZK_BASE="http://localhost:8080/rest/zktransfer" \
+            -e TOKEN_ADDRESS="$TOKEN_ADDRESS" \
+            -e ZK_ACCOUNT_ID_01="$ZK_ACCOUNT_ID_01" \
+            -e ZK_ACCOUNT_ID_02="$ZK_ACCOUNT_ID_02" \
+            -e SIGNER_ADDRESS="$SIGNER_ADDRESS" \
+            -e TEST_MODE="$mode" \
+            --vus "$vus" \
+            "$count_flag" "$count_val" \
+            "${SCRIPT_DIR}/loadtest.js" > "$tmp_out" || true
+    fi
 
     echo "$tmp_out"
 }
@@ -97,7 +110,6 @@ run_k6() {
 prepare_single_account() {
     local i="$1"
     local count="$2"
-    exec 4>&1 1>&2
 
     log_step "(${i}/${count}) ── 계정 세팅 시작 ──────────────────"
 
@@ -391,7 +403,7 @@ prepare_accounts() {
     for (( i=1; i<=count; i++ )); do
         local out_file
         out_file="${tmp_dir}/$(printf '%05d' "$i").json"
-        if ! prepare_single_account "$i" "$count" 3> "$out_file"; then
+        if ! prepare_single_account "$i" "$count" 4> "$out_file"; then
             rm -f "$out_file"
             had_failures=1
             continue
@@ -469,10 +481,11 @@ trend_val() {
 }
 
 # http_reqs rate (TPS) 추출
-# 실제 k6 v1.7.0 형식: "http_reqs....: 3  0.852759/s"
+# 커스텀 Counter 기반 TPS 추출
+# k6 Counter 출력 형식: "api_account_count...: 100 3.33/s"
 rate_val() {
-    local file="$1"
-    grep -m1 "http_reqs\b" "$file" 2>/dev/null \
+    local file="$1" metric="${2:-http_reqs}"
+    grep -m1 "${metric}\b" "$file" 2>/dev/null \
         | grep -oE "[0-9]+\.[0-9]+/s" \
         | grep -oE "^[0-9]+\.[0-9]+" \
         || echo "0"
@@ -527,7 +540,7 @@ fmt_tps() {
     echo "| 테스트 일시 | $(date '+%Y-%m-%d %H:%M:%S') |"
     echo "| CPU | ${CPU_CORES} Core |"
     echo "| 단건 반복 횟수 | ${SINGLE_ITERATIONS} |"
-    echo "| 다중/E2E Duration | ${MULTI_DURATION} |"
+    echo "| 다중 VU당 반복 횟수 | ${MULTI_ITERATIONS} |"
     echo "| VU | ${VUS_LIST[*]} |"
     echo ""
     echo "---"
@@ -596,13 +609,14 @@ if [[ "$SECTION" == "multi" || "$SECTION" == "all" ]]; then
         echo "| --- | --- | --- | --- | --- | --- | --- | --- |"
     } >> "$RESULT_FILE"
 
-    for vu in "${VUS_LIST[@]}"; do
-        for api in approve deposit account send receive withdraw; do
-            log_step "다중 테스트 VU=${vu} 단계 실행 중: ${api}"
-            tmp=$(run_k6 "$api" "$vu" --duration "$MULTI_DURATION" "${SHARED_ACCOUNTS_FILE:-}")
-            log_ok "VU=${vu} ${api} 단계 완료, 메트릭 추출 중..."
+    for api in account approve deposit send receive withdraw; do
+      for vu in "${VUS_LIST[@]}"; do
+            local_iters=$(( MULTI_ITERATIONS * vu ))
+            log_step "다중 테스트 VU=${vu} 실행 중: ${api}"
+            tmp=$(run_k6 "$api" "$vu" --iterations "$local_iters" "${SHARED_ACCOUNTS_FILE:-}")
+            log_ok "VU=${vu} ${api} 완료, 메트릭 추출 중..."
 
-            tps=$(rate_val "$tmp")
+            tps=$(rate_val "$tmp" "api_${api}_count")
             er=$(error_rate "$tmp")
             avg=$(trend_val "$tmp" "api_${api}" "avg")
             p95=$(trend_val "$tmp" "api_${api}" "p(95)")
@@ -612,7 +626,7 @@ if [[ "$SECTION" == "multi" || "$SECTION" == "all" ]]; then
                 >> "$RESULT_FILE"
             rm -f "$tmp"
         done
-        log_ok "다중 테스트 VU=${vu} 완료 (단계별 순차 실행)"
+        log_ok "다중 테스트 ${api} 완료"
     done
 
     echo "" >> "$RESULT_FILE"

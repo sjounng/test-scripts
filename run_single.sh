@@ -22,14 +22,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/config/config.sh"
 source "${SCRIPT_DIR}/config/lib.sh"
 
-if [ ! -f .state ]; then
+if [ ! -f "${SCRIPT_DIR}/.state" ]; then
     log_warn ".state 파일이 없습니다. 환경 변수가 비어있을 수 있습니다."
 fi
 
-TOKEN_ADDRESS=$(grep "^TOKEN_ADDRESS=" .state | cut -d'=' -f2 || echo "")
-ZK_ACCOUNT_ID_01=$(grep "^ZK_ACCOUNT_ID_01=" .state | cut -d'=' -f2 || echo "")
-ZK_ACCOUNT_ID_02=$(grep "^ZK_ACCOUNT_ID_02=" .state | cut -d'=' -f2 || echo "")
-SIGNER_ADDRESS=$(grep "^SIGNER_ADDRESS=" .state | cut -d'=' -f2 || echo "")
+TOKEN_ADDRESS=$(grep "^TOKEN_ADDRESS=" "${SCRIPT_DIR}/.state" | cut -d'=' -f2 || echo "")
+ZK_ACCOUNT_ID_01=$(grep "^ZK_ACCOUNT_ID_01=" "${SCRIPT_DIR}/.state" | cut -d'=' -f2 || echo "")
+ZK_ACCOUNT_ID_02=$(grep "^ZK_ACCOUNT_ID_02=" "${SCRIPT_DIR}/.state" | cut -d'=' -f2 || echo "")
+SIGNER_ADDRESS=$(grep "^SIGNER_ADDRESS=" "${SCRIPT_DIR}/.state" | cut -d'=' -f2 || echo "")
 
 APIS=()
 ITERATIONS=1
