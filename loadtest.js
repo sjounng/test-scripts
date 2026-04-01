@@ -180,10 +180,7 @@ function doWithdraw(fromAccountId, eoaRecv, tokenAddress, trackMetric = true) {
 // --- 풀 사이클: approve → deposit → send → receive → withdraw ---
 function runFullCycle(sender, label) {
     const tokenAddress = sender.tokenAddress;
-    // 미리 생성된 receiver가 있으면 사용, 없으면 즉석 생성
-    let acct2 = sender.receiverAccountId
-        ? { accountId: sender.receiverAccountId, signerAddress: sender.receiverSignerAddress }
-        : null;
+    let acct2 = null;
     try {
         console.log(`[${label}] 1/6 approve`);
         doApprove(sender.accountId, tokenAddress);
@@ -191,13 +188,9 @@ function runFullCycle(sender, label) {
         console.log(`[${label}] 2/6 deposit`);
         doDeposit(sender.accountId, tokenAddress);
 
-        if (!acct2) {
-            console.log(`[${label}] 3/6 account`);
-            acct2 = doAccount();
-            console.log(`[${label}] acct2=${acct2.accountId}`);
-        } else {
-            console.log(`[${label}] 3/6 account (미리 생성된 receiver 사용)`);
-        }
+        console.log(`[${label}] 3/6 account`);
+        acct2 = doAccount();
+        console.log(`[${label}] acct2=${acct2.accountId}`);
 
         console.log(`[${label}] 4/6 send`);
         const txHash = doSend(sender.accountId, acct2.accountId, tokenAddress);
