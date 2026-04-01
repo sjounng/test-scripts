@@ -32,6 +32,13 @@ const sendCount    = new Counter('api_send_count');
 const receiveCount = new Counter('api_receive_count');
 const withdrawCount = new Counter('api_withdraw_count');
 
+const accountFail  = new Counter('api_account_fail');
+const approveFail  = new Counter('api_approve_fail');
+const depositFail  = new Counter('api_deposit_fail');
+const sendFail     = new Counter('api_send_fail');
+const receiveFail  = new Counter('api_receive_fail');
+const withdrawFail = new Counter('api_withdraw_fail');
+
 export const options = {
     summaryTrendStats: ['avg', 'min', 'max', 'p(95)', 'p(99)'],
 };
@@ -75,6 +82,7 @@ function doAccount(trackMetric = true) {
     check(res, { '[account] status 200': bodyOk });
     if (!bodyOk(res)) {
         logFail('account', res);
+        accountFail.add(1);
         throw new Error('account 실패');
     }
     return {
@@ -96,11 +104,13 @@ function doApprove(accountId, tokenAddress, trackMetric = true) {
     check(res, { '[approve] status 200': bodyOk });
     if (!bodyOk(res)) {
         logFail('approve', res);
+        approveFail.add(1);
         throw new Error('approve 실패');
     }
     const txHash = res.json('data.txHash');
     if (!txHash) {
         logFail('approve', res);
+        approveFail.add(1);
         throw new Error('approve tx 미확정 (txHash 없음)');
     }
     return txHash;
@@ -119,6 +129,7 @@ function doDeposit(accountId, tokenAddress, trackMetric = true) {
     check(res, { '[deposit] status 200': bodyOk });
     if (!bodyOk(res)) {
         logFail('deposit', res);
+        depositFail.add(1);
         throw new Error('deposit 실패');
     }
 }
@@ -137,6 +148,7 @@ function doSend(fromAccountId, toAccountId, tokenAddress, trackMetric = true) {
     check(res, { '[send] status 200': bodyOk });
     if (!bodyOk(res)) {
         logFail('send', res);
+        sendFail.add(1);
         throw new Error('send 실패');
     }
     return res.json('data.txHash');
@@ -155,6 +167,7 @@ function doReceive(toAccountId, txHash, tokenAddress, trackMetric = true) {
     check(res, { '[receive] status 200': bodyOk });
     if (!bodyOk(res)) {
         logFail('receive', res);
+        receiveFail.add(1);
         throw new Error('receive 실패');
     }
 }
@@ -173,39 +186,34 @@ function doWithdraw(fromAccountId, eoaRecv, tokenAddress, trackMetric = true) {
     check(res, { '[withdraw] status 200': bodyOk });
     if (!bodyOk(res)) {
         logFail('withdraw', res);
+        withdrawFail.add(1);
         throw new Error('withdraw 실패');
     }
 }
 
-// --- 풀 사이클: approve → deposit → send → receive → withdraw ---
+// --- 풀 사이클: approve → deposit → account → send → receive → withdraw ---
 function runFullCycle(sender, label) {
     const tokenAddress = sender.tokenAddress;
-    let acct2 = null;
-    try {
-        console.log(`[${label}] 1/6 approve`);
-        doApprove(sender.accountId, tokenAddress);
 
-        console.log(`[${label}] 2/6 deposit`);
-        doDeposit(sender.accountId, tokenAddress);
+    console.log(`[${label}] 1/6 approve`);
+    doApprove(sender.accountId, tokenAddress);
 
-        console.log(`[${label}] 3/6 account`);
-        acct2 = doAccount();
-        console.log(`[${label}] acct2=${acct2.accountId}`);
+    console.log(`[${label}] 2/6 deposit`);
+    doDeposit(sender.accountId, tokenAddress);
 
-        console.log(`[${label}] 4/6 send`);
-        const txHash = doSend(sender.accountId, acct2.accountId, tokenAddress);
-        console.log(`[${label}] txHash=${txHash}`);
+    console.log(`[${label}] 3/6 account`);
+    const acct2 = doAccount();
+    console.log(`[${label}] acct2=${acct2.accountId}`);
 
-        console.log(`[${label}] 5/6 receive`);
-        doReceive(acct2.accountId, txHash, tokenAddress);
-    } catch (e) {
-        console.error(`[${label}] 중단: ${e.message}`);
-    } finally {
-        if (acct2) {
-            console.log(`[${label}] 6/6 withdraw`);
-            try { doWithdraw(acct2.accountId, acct2.signerAddress, tokenAddress); } catch { }
-        }
-    }
+    console.log(`[${label}] 4/6 send`);
+    const txHash = doSend(sender.accountId, acct2.accountId, tokenAddress);
+    console.log(`[${label}] txHash=${txHash}`);
+
+    console.log(`[${label}] 5/6 receive`);
+    doReceive(acct2.accountId, txHash, tokenAddress);
+
+    console.log(`[${label}] 6/6 withdraw`);
+    doWithdraw(acct2.accountId, acct2.signerAddress, tokenAddress);
 }
 
 function getSender() {
@@ -233,48 +241,27 @@ function runMode(sender, label) {
         break;
     case 'send': {
         console.log(`[${label}] send`);
-        // 사전 충전된 계정이 없으면 폴백으로 approve/deposit 실행
-        if (!sender.receiverAccountId) {
-            doApprove(sender.accountId, tokenAddress, false);
-            doDeposit(sender.accountId, tokenAddress, false);
-        }
-        const receiverS = sender.receiverAccountId || doAccount(false).accountId;
-        doSend(sender.accountId, receiverS, tokenAddress);
+        doSend(sender.accountId, sender.receiverAccountId, tokenAddress);
         break;
     }
     case 'receive': {
         console.log(`[${label}] receive`);
-        if (!sender.receiverAccountId) {
-            doApprove(sender.accountId, tokenAddress, false);
-            doDeposit(sender.accountId, tokenAddress, false);
-        }
-        const recvId = sender.receiverAccountId || (() => { const r = doAccount(false); return r.accountId; })();
-        const txHash = doSend(sender.accountId, recvId, tokenAddress, false);
-        doReceive(recvId, txHash, tokenAddress);
+        const txHash = doSend(sender.accountId, sender.receiverAccountId, tokenAddress, false);
+        doReceive(sender.receiverAccountId, txHash, tokenAddress);
         break;
     }
     case 'withdraw': {
         console.log(`[${label}] withdraw`);
-        // 사전 충전된 계정이면 sender에서 바로 출금
-        if (sender.receiverAccountId) {
-            doWithdraw(sender.accountId, sender.signerAddress, tokenAddress);
-        } else {
-            doApprove(sender.accountId, tokenAddress, false);
-            doDeposit(sender.accountId, tokenAddress, false);
-            const r = doAccount(false);
-            const txHash2 = doSend(sender.accountId, r.accountId, tokenAddress, false);
-            doReceive(r.accountId, txHash2, tokenAddress, false);
-            doWithdraw(r.accountId, r.signerAddress, tokenAddress);
-        }
+        doWithdraw(sender.receiverAccountId, sender.receiverSignerAddress, tokenAddress);
         break;
     }
     case 'e2e':
         runFullCycle(sender, label);
         break;
     case 'barrier': {
-        const recvId = sender.receiverAccountId;
-        const recvSigner = sender.receiverSignerAddress;
         const baseTime = barrierStart;
+        let recvId = null;
+        let recvSigner = null;
 
         function waitForPhase(phase) {
             const target = baseTime + phase * PHASE_LEN;
@@ -285,32 +272,40 @@ function runMode(sender, label) {
         // Phase 0: approve — 모든 VU 동시 시작
         waitForPhase(0);
         console.log(`[${label}] phase approve`);
-        doApprove(sender.accountId, tokenAddress);
+        try { doApprove(sender.accountId, tokenAddress); } catch (e) { console.error(`[${label}] approve 실패: ${e.message}`); }
 
         // Phase 1: deposit
         waitForPhase(1);
         console.log(`[${label}] phase deposit`);
-        doDeposit(sender.accountId, tokenAddress);
+        try { doDeposit(sender.accountId, tokenAddress); } catch (e) { console.error(`[${label}] deposit 실패: ${e.message}`); }
 
         // Phase 2: account
         waitForPhase(2);
         console.log(`[${label}] phase account`);
-        doAccount();
+        try {
+            const acct2 = doAccount();
+            recvId = acct2.accountId;
+            recvSigner = acct2.signerAddress;
+        } catch (e) { console.error(`[${label}] account 실패: ${e.message}`); }
 
         // Phase 3: send
         waitForPhase(3);
         console.log(`[${label}] phase send`);
-        const txHash = doSend(sender.accountId, recvId, tokenAddress);
+        let txHash = null;
+        try { txHash = doSend(sender.accountId, recvId, tokenAddress); } catch (e) { console.error(`[${label}] send 실패: ${e.message}`); }
 
         // Phase 4: receive
         waitForPhase(4);
         console.log(`[${label}] phase receive`);
-        doReceive(recvId, txHash, tokenAddress);
+        try {
+            if (txHash) { doReceive(recvId, txHash, tokenAddress); }
+            else { receiveFail.add(1); console.error(`[${label}] receive 건너뜀: txHash 없음`); }
+        } catch (e) { console.error(`[${label}] receive 실패: ${e.message}`); }
 
         // Phase 5: withdraw
         waitForPhase(5);
         console.log(`[${label}] phase withdraw`);
-        doWithdraw(recvId, recvSigner, tokenAddress);
+        try { doWithdraw(recvId, recvSigner, tokenAddress); } catch (e) { console.error(`[${label}] withdraw 실패: ${e.message}`); }
         break;
     }
     default:

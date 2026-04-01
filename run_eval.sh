@@ -58,7 +58,7 @@ mkdir -p "$LOG_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RESULT_FILE="${LOG_DIR}/cpu_${CPU_CORES}_${TIMESTAMP}.md"
 DEFAULT_ACCOUNTS_FILE="${SCRIPT_DIR}/accounts.json"
-
+ 
 # ---- k6 실행 함수 ----
 # 반환값: k6 텍스트 출력이 저장된 임시 파일 경로
 # 인자: mode vus count_flag count_val [accounts_file]
@@ -230,15 +230,6 @@ prepare_single_account() {
     signer_address=$(extract_json "$RESPONSE" '.data.signerAddress // empty')
     [[ -n "$zk_account_id" && "$zk_account_id" != "null" ]] || { log_warn "(${i}) ZK accountId 없음, 건너뜀"; return 1; }
 
-    # 3-2. receiver 계좌
-    call_api POST "${SDS_ZK_BASE}/accounts" \
-        "$ADMIN_CLIENT_ID" "$ADMIN_CLIENT_SECRET"
-    if ! check_http_ok "ZK receiver 계좌 생성 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
-    local receiver_account_id receiver_signer_address
-    receiver_account_id=$(extract_json "$RESPONSE" '.data.accountId // empty')
-    receiver_signer_address=$(extract_json "$RESPONSE" '.data.signerAddress // empty')
-    [[ -n "$receiver_account_id" && "$receiver_account_id" != "null" ]] || { log_warn "(${i}) receiver accountId 없음, 건너뜀"; return 1; }
-
     # ============================================
     # 4. 전송 (On to On)
     # ============================================
@@ -266,9 +257,7 @@ prepare_single_account() {
         --arg accountId "$zk_account_id" \
         --arg signerAddress "$signer_address" \
         --arg tokenAddress "$token_address" \
-        --arg receiverAccountId "$receiver_account_id" \
-        --arg receiverSignerAddress "$receiver_signer_address" \
-        '{accountId: $accountId, signerAddress: $signerAddress, tokenAddress: $tokenAddress, receiverAccountId: $receiverAccountId, receiverSignerAddress: $receiverSignerAddress}' >&4
+        '{accountId: $accountId, signerAddress: $signerAddress, tokenAddress: $tokenAddress}' >&4
     log_ok "(${i}/${count}) 완료 → accountId: ${zk_account_id}"
 }
 
@@ -391,16 +380,21 @@ success_rate() {
     awk "BEGIN { printf \"%.1f\", $pct }"
 }
 
-# 에러율 계산
-# 실제 k6 v1.7.0 형식: "checks_failed......: 0.00%  0 out of 3"
+# API별 에러율 계산
+# api_xxx_fail / api_xxx_count * 100
+# k6 Counter 출력 형식: "api_account_count...: 10 ..."
 error_rate() {
-    local file="$1"
-    local pct
-    pct=$(grep -m1 "checks_failed" "$file" 2>/dev/null \
-        | grep -oE "[0-9]+\.[0-9]+%" \
-        | tr -d '%' || echo "")
-    if [[ -z "$pct" ]]; then echo "N/A"; return; fi
-    awk "BEGIN { printf \"%.1f\", $pct }"
+    local file="$1" api="$2"
+    local fail_count total_count
+    fail_count=$(grep -m1 "api_${api}_fail" "$file" 2>/dev/null \
+        | grep -oE "^\s*api_${api}_fail[^:]*:\s*[0-9]+" \
+        | grep -oE "[0-9]+$" || echo "0")
+    total_count=$(grep -m1 "api_${api}_count" "$file" 2>/dev/null \
+        | grep -oE "^\s*api_${api}_count[^:]*:\s*[0-9]+" \
+        | grep -oE "[0-9]+$" || echo "0")
+    [[ -z "$fail_count" ]] && fail_count=0
+    [[ -z "$total_count" || "$total_count" == "0" ]] && { echo "N/A"; return; }
+    awk "BEGIN { printf \"%.1f\", ($fail_count / $total_count) * 100 }"
 }
 
 # float → 정수 ms 문자열
@@ -503,7 +497,7 @@ if [[ "$SECTION" == "multi" || "$SECTION" == "all" ]]; then
         log_ok "VU=${vu} 완료, 메트릭 추출 중..."
 
         for api in account approve deposit send receive withdraw; do
-            er=$(error_rate "$tmp")
+            er=$(error_rate "$tmp" "$api")
             avg=$(trend_val "$tmp" "api_${api}" "avg")
             p95=$(trend_val "$tmp" "api_${api}" "p(95)")
             p99=$(trend_val "$tmp" "api_${api}" "p(99)")
