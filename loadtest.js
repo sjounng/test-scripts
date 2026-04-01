@@ -1,5 +1,5 @@
 import http from 'k6/http';
-import { check } from 'k6';
+import { check, sleep } from 'k6';
 import { Counter, Trend } from 'k6/metrics';
 
 const SDS_ZK_BASE = __ENV.SDS_ZK_BASE || 'http://localhost:8080/rest/zktransfer';
@@ -11,6 +11,7 @@ const TOKEN_ADDRESS = __ENV.TOKEN_ADDRESS || '';
 const ZK_ACCOUNT_ID_01 = __ENV.ZK_ACCOUNT_ID_01 || '';
 const SIGNER_ADDRESS = __ENV.SIGNER_ADDRESS || '';
 const MODE = __ENV.TEST_MODE || 'e2e';
+const PHASE_LEN = parseFloat(__ENV.PHASE_LEN || '15') * 1000; // ms per barrier phase
 
 // VU별 계정 목록: [{accountId, signerAddress, tokenAddress}, ...]
 const ACCOUNTS_FILE = __ENV.ACCOUNTS_FILE || '';
@@ -176,10 +177,13 @@ function doWithdraw(fromAccountId, eoaRecv, tokenAddress, trackMetric = true) {
     }
 }
 
-// --- 풀 사이클: approve → deposit → account(acct2) → send → receive → withdraw ---
+// --- 풀 사이클: approve → deposit → send → receive → withdraw ---
 function runFullCycle(sender, label) {
     const tokenAddress = sender.tokenAddress;
-    let acct2;
+    // 미리 생성된 receiver가 있으면 사용, 없으면 즉석 생성
+    let acct2 = sender.receiverAccountId
+        ? { accountId: sender.receiverAccountId, signerAddress: sender.receiverSignerAddress }
+        : null;
     try {
         console.log(`[${label}] 1/6 approve`);
         doApprove(sender.accountId, tokenAddress);
@@ -187,9 +191,13 @@ function runFullCycle(sender, label) {
         console.log(`[${label}] 2/6 deposit`);
         doDeposit(sender.accountId, tokenAddress);
 
-        console.log(`[${label}] 3/6 account`);
-        acct2 = doAccount();
-        console.log(`[${label}] acct2=${acct2.accountId}`);
+        if (!acct2) {
+            console.log(`[${label}] 3/6 account`);
+            acct2 = doAccount();
+            console.log(`[${label}] acct2=${acct2.accountId}`);
+        } else {
+            console.log(`[${label}] 3/6 account (미리 생성된 receiver 사용)`);
+        }
 
         console.log(`[${label}] 4/6 send`);
         const txHash = doSend(sender.accountId, acct2.accountId, tokenAddress);
@@ -232,41 +240,100 @@ function runMode(sender, label) {
         break;
     case 'send': {
         console.log(`[${label}] send`);
-        doApprove(sender.accountId, tokenAddress, false);
-        doDeposit(sender.accountId, tokenAddress, false);
-        const receiver = doAccount(false);
-        doSend(sender.accountId, receiver.accountId, tokenAddress);
+        // 사전 충전된 계정이 없으면 폴백으로 approve/deposit 실행
+        if (!sender.receiverAccountId) {
+            doApprove(sender.accountId, tokenAddress, false);
+            doDeposit(sender.accountId, tokenAddress, false);
+        }
+        const receiverS = sender.receiverAccountId || doAccount(false).accountId;
+        doSend(sender.accountId, receiverS, tokenAddress);
         break;
     }
     case 'receive': {
         console.log(`[${label}] receive`);
-        doApprove(sender.accountId, tokenAddress, false);
-        doDeposit(sender.accountId, tokenAddress, false);
-        const receiver = doAccount(false);
-        const txHash = doSend(sender.accountId, receiver.accountId, tokenAddress, false);
-        doReceive(receiver.accountId, txHash, tokenAddress);
+        if (!sender.receiverAccountId) {
+            doApprove(sender.accountId, tokenAddress, false);
+            doDeposit(sender.accountId, tokenAddress, false);
+        }
+        const recvId = sender.receiverAccountId || (() => { const r = doAccount(false); return r.accountId; })();
+        const txHash = doSend(sender.accountId, recvId, tokenAddress, false);
+        doReceive(recvId, txHash, tokenAddress);
         break;
     }
     case 'withdraw': {
         console.log(`[${label}] withdraw`);
-        doApprove(sender.accountId, tokenAddress, false);
-        doDeposit(sender.accountId, tokenAddress, false);
-        const receiver = doAccount(false);
-        const txHash = doSend(sender.accountId, receiver.accountId, tokenAddress, false);
-        doReceive(receiver.accountId, txHash, tokenAddress, false);
-        doWithdraw(receiver.accountId, receiver.signerAddress, tokenAddress);
+        // 사전 충전된 계정이면 sender에서 바로 출금
+        if (sender.receiverAccountId) {
+            doWithdraw(sender.accountId, sender.signerAddress, tokenAddress);
+        } else {
+            doApprove(sender.accountId, tokenAddress, false);
+            doDeposit(sender.accountId, tokenAddress, false);
+            const r = doAccount(false);
+            const txHash2 = doSend(sender.accountId, r.accountId, tokenAddress, false);
+            doReceive(r.accountId, txHash2, tokenAddress, false);
+            doWithdraw(r.accountId, r.signerAddress, tokenAddress);
+        }
         break;
     }
     case 'e2e':
         runFullCycle(sender, label);
         break;
+    case 'barrier': {
+        const recvId = sender.receiverAccountId;
+        const recvSigner = sender.receiverSignerAddress;
+        const baseTime = barrierStart;
+
+        function waitForPhase(phase) {
+            const target = baseTime + phase * PHASE_LEN;
+            const remaining = (target - Date.now()) / 1000;
+            if (remaining > 0) sleep(remaining);
+        }
+
+        // Phase 0: approve — 모든 VU 동시 시작
+        waitForPhase(0);
+        console.log(`[${label}] phase approve`);
+        doApprove(sender.accountId, tokenAddress);
+
+        // Phase 1: deposit
+        waitForPhase(1);
+        console.log(`[${label}] phase deposit`);
+        doDeposit(sender.accountId, tokenAddress);
+
+        // Phase 2: account
+        waitForPhase(2);
+        console.log(`[${label}] phase account`);
+        doAccount();
+
+        // Phase 3: send
+        waitForPhase(3);
+        console.log(`[${label}] phase send`);
+        const txHash = doSend(sender.accountId, recvId, tokenAddress);
+
+        // Phase 4: receive
+        waitForPhase(4);
+        console.log(`[${label}] phase receive`);
+        doReceive(recvId, txHash, tokenAddress);
+
+        // Phase 5: withdraw
+        waitForPhase(5);
+        console.log(`[${label}] phase withdraw`);
+        doWithdraw(recvId, recvSigner, tokenAddress);
+        break;
+    }
     default:
         throw new Error(`지원하지 않는 TEST_MODE: ${MODE}`);
     }
 }
 
 // --- 메인 ---
-export default function () {
+let barrierStart = 0;
+
+export function setup() {
+    return { barrierStart: Date.now() };
+}
+
+export default function (data) {
+    barrierStart = data.barrierStart;
     const sender = getSender();
     runMode(sender, `${MODE}:VU=${__VU}`);
 }

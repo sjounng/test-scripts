@@ -84,6 +84,7 @@ run_k6() {
             -e ZK_ACCOUNT_ID_02="$ZK_ACCOUNT_ID_02" \
             -e SIGNER_ADDRESS="$SIGNER_ADDRESS" \
             -e TEST_MODE="$mode" \
+            -e BARRIER_ITERS="$MULTI_ITERATIONS" \
             -e "$accounts_arg" \
             --vus "$vus" \
             "$count_flag" "$count_val" \
@@ -96,6 +97,7 @@ run_k6() {
             -e ZK_ACCOUNT_ID_02="$ZK_ACCOUNT_ID_02" \
             -e SIGNER_ADDRESS="$SIGNER_ADDRESS" \
             -e TEST_MODE="$mode" \
+            -e BARRIER_ITERS="$MULTI_ITERATIONS" \
             --vus "$vus" \
             "$count_flag" "$count_val" \
             "${SCRIPT_DIR}/loadtest.js" > "$tmp_out" || true
@@ -105,8 +107,8 @@ run_k6() {
 }
 
 # ---- 다중 테스트 / E2E 공용 계정 사전 준비 ----
-# setup.sh 1~5단계 전체를 VU 수만큼 반복
-# 반환값: [{accountId, signerAddress}, ...] JSON 파일 경로
+# .state의 TOKEN_ADDRESS, SC_ID를 재사용하여 VU별 계정만 생성
+# 반환값: [{accountId, signerAddress, tokenAddress, receiverAccountId, receiverSignerAddress}, ...] JSON 파일 경로
 prepare_single_account() {
     local i="$1"
     local count="$2"
@@ -114,108 +116,14 @@ prepare_single_account() {
     log_step "(${i}/${count}) ── 계정 세팅 시작 ──────────────────"
 
     local idx="${RUN_ID}_e2e${i}"
+    local token_address="$TOKEN_ADDRESS"
+    local sc_id="$SC_ID"
 
     # ============================================
-    # 1. 발행
+    # 1. 개인사용자 관리
     # ============================================
 
-    # 1-1. 메인넷 등록 (chainId는 반복마다 고유하게)
-    call_api POST "${LIFECYCLE_BASE}/sc/mainnets" \
-        "$PLATFORM_CLIENT_ID" "$PLATFORM_CLIENT_SECRET" \
-        "{
-            \"mainnetName\": \"SDSMainNet_${idx}\",
-            \"mainnetType\": \"${MAINNET_TYPE}\",
-            \"endpoint\": \"${MAINNET_ENDPOINT}\",
-            \"chainId\": $(( (MAINNET_CHAIN_ID % 100000) * 100 + i ))
-        }"
-    if ! check_http_ok "메인넷 등록 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
-    local mainnet_id
-    mainnet_id=$(extract_json "$RESPONSE" '.data.mainnetId // .data.id // empty')
-    [[ -n "$mainnet_id" && "$mainnet_id" != "null" ]] || { log_warn "(${i}) mainnetId 없음, 건너뜀"; return 1; }
-
-    # 1-2. 발행 계획 등록
-    local rand
-    rand=$(cat /dev/urandom | LC_ALL=C tr -dc 'a-z0-9' | head -c 6)
-    call_api POST "${LIFECYCLE_BASE}/issuances" \
-        "$ISSUER_CLIENT_ID" "$ISSUER_CLIENT_SECRET" \
-        "{
-            \"mainnetId\": ${mainnet_id},
-            \"scName\": \"MySC_${rand}\",
-            \"scSymbol\": \"MS${rand}\",
-            \"scIssueAmount\": ${SC_ISSUE_AMOUNT},
-            \"scPlannedIssuanceDate\": \"${SC_PLANNED_DATE}\",
-            \"scIssueNote\": \"${SC_ISSUE_NOTE}\"
-        }"
-    if ! check_http_ok "발행 계획 등록 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
-    local sc_issue_id sc_id
-    sc_issue_id=$(extract_json "$RESPONSE" '.data.scIssueId')
-    sc_id=$(extract_json "$RESPONSE" '.data.scId')
-    [[ -n "$sc_issue_id" && "$sc_issue_id" != "null" ]] || { log_warn "(${i}) scIssueId 없음, 건너뜀"; return 1; }
-
-    # 1-3. 준비금 등록
-    call_api POST "${LIFECYCLE_BASE}/reserves" \
-        "$ISSUER_CLIENT_ID" "$ISSUER_CLIENT_SECRET" \
-        "{
-            \"scIssueId\": \"${sc_issue_id}\",
-            \"scId\": \"${sc_id}\",
-            \"reserve\": {
-                \"reserveNote\": \"${RESERVE_NOTE}\",
-                \"reserveOp\": [
-                    {
-                        \"reserveOpInstitutionName\": \"국민은행\",
-                        \"reserveOpType\": \"FiatDeposit\",
-                        \"reserveOpPeriodStart\": \"2025-10-22T09:00:00\",
-                        \"reserveOpPeriodEnd\": \"2026-03-31T23:59:59\",
-                        \"reserveOpNote\": \"유동성 확보\",
-                        \"reserveOpAmount\": ${RESERVE_FIAT_AMOUNT}
-                    },
-                    {
-                        \"reserveOpInstitutionName\": \"삼성자산운용 MMF\",
-                        \"reserveOpType\": \"Mmf\",
-                        \"reserveOpPeriodStart\": \"2025-10-22T09:00:00\",
-                        \"reserveOpPeriodEnd\": \"2026-03-31T23:59:59\",
-                        \"reserveOpNote\": \"단기 MMF 운용\",
-                        \"reserveOpAmount\": ${RESERVE_MMF_AMOUNT}
-                    }
-                ]
-            }
-        }"
-    if ! check_http_ok "준비금 등록 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
-    local reserve_id
-    reserve_id=$(extract_json "$RESPONSE" '.data.reserveId')
-
-    # 1-4. 준비금 승인
-    call_api PUT "${LIFECYCLE_BASE}/reserves/${reserve_id}/approval" \
-        "$ISSUER_CLIENT_ID" "$ISSUER_CLIENT_SECRET" \
-        '{"approval":"Approved"}'
-    if ! check_http_ok "준비금 승인 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
-
-    # 1-5. 발행 계획 승인
-    call_api PUT "${LIFECYCLE_BASE}/issuances/${sc_issue_id}/approval" \
-        "$ISSUER_CLIENT_ID" "$ISSUER_CLIENT_SECRET" \
-        '{"approval":"Approved"}'
-    if ! check_http_ok "발행 계획 승인 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
-
-    # 1-6. 발행 실행
-    if issue_issuance_with_retry "$sc_issue_id" "$i"; then
-        log_ok "발행 실행 (${i}) (HTTP ${HTTP_STATUS})"
-    else
-        check_http_ok "발행 실행 (${i})" || true
-        log_warn "(${i}) 건너뜀"
-        return 1
-    fi
-
-    # 1-7. token_address DB 조회
-    local token_address
-    token_address=$(query_db "SELECT token_address FROM stc_sc WHERE sc_id = ${sc_id} ORDER BY created_date DESC LIMIT 1;")
-    [[ -n "$token_address" && "$token_address" == 0x* ]] || { log_warn "(${i}) token_address 조회 실패, 건너뜀"; return 1; }
-    log_ok "(${i}) token_address: ${token_address}"
-
-    # ============================================
-    # 2. 개인사용자 관리
-    # ============================================
-
-    # 2-1. 개인사용자 추가
+    # 1-1. 개인사용자 추가
     call_api POST "${LIFECYCLE_BASE}/users/individuals" \
         "$ADMIN_CLIENT_ID" "$ADMIN_CLIENT_SECRET" \
         "{
@@ -234,13 +142,13 @@ prepare_single_account() {
     cli_id=$(extract_json "$RESPONSE" '.data.longTokenClientId')
     cli_secret=$(extract_json "$RESPONSE" '.data.longToken')
 
-    # 2-2. 사용자 승인
+    # 1-2. 사용자 승인
     call_api PUT "${LIFECYCLE_BASE}/users/${user_id}/individuals/approval" \
         "$PLATFORM_CLIENT_ID" "$PLATFORM_CLIENT_SECRET" \
         '{"approval":"Approved"}'
     if ! check_http_ok "사용자 승인 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
 
-    # 2-3. 포트폴리오 조회
+    # 1-3. 포트폴리오 조회
     call_api GET "${LIFECYCLE_BASE}/portfolios" \
         "$PLATFORM_CLIENT_ID" "$PLATFORM_CLIENT_SECRET"
     if ! check_http_ok "포트폴리오 조회 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
@@ -249,7 +157,7 @@ prepare_single_account() {
         "[.data.content[]? | select(.ownerId == ${user_id} or .ownerId == \"${user_id}\")] | first | .portfolioId // empty")
     [[ -n "$portfolio_id" && "$portfolio_id" != "null" ]] || { log_warn "(${i}) portfolioId 없음, 건너뜀"; return 1; }
 
-    # 2-4. 원화계좌 조회
+    # 1-4. 원화계좌 조회
     call_api GET "${LIFECYCLE_BASE}/portfolios/${portfolio_id}/accounts" \
         "$cli_id" "$cli_secret"
     if ! check_http_ok "원화계좌 조회 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
@@ -259,10 +167,10 @@ prepare_single_account() {
     [[ -n "$fiat_account_id" && "$fiat_account_id" != "null" ]] || { log_warn "(${i}) fiatAccountId 없음, 건너뜀"; return 1; }
 
     # ============================================
-    # 3. 전환
+    # 2. 전환
     # ============================================
 
-    # 3-1. 가상계좌 조회
+    # 2-1. 가상계좌 조회
     call_api GET "${LIFECYCLE_BASE}/accounts/fiat/virtual-and-withdrawal" \
         "$cli_id" "$cli_secret"
     if ! check_http_ok "가상계좌 조회 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
@@ -271,7 +179,7 @@ prepare_single_account() {
         '[.data.content[]? | select(.accountType == "Virtual")] | first | .accountNumber // empty')
     [[ -n "$virtual_account" && "$virtual_account" != "null" ]] || { log_warn "(${i}) 가상계좌번호 없음, 건너뜀"; return 1; }
 
-    # 3-2. 원화 입금
+    # 2-2. 원화 입금
     call_api POST "${LIFECYCLE_BASE}/webhook/accounts/fiat/deposit" \
         "$cli_id" "$cli_secret" \
         "{
@@ -281,7 +189,7 @@ prepare_single_account() {
         }"
     if ! check_http_ok "원화 입금 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
 
-    # 3-3. 온체인 매수 (FiatToOnchain)
+    # 2-3. 온체인 매수 (FiatToOnchain)
     call_api POST "${LIFECYCLE_BASE}/conversions" \
         "$cli_id" "$cli_secret" \
         "{
@@ -293,7 +201,7 @@ prepare_single_account() {
         }"
     if ! check_http_ok "온체인 매수 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
 
-    # 3-4. 포트폴리오 재조회 (코인계좌 확인)
+    # 2-4. 포트폴리오 재조회 (코인계좌 확인)
     call_api GET "${LIFECYCLE_BASE}/portfolios/${portfolio_id}/accounts" \
         "$cli_id" "$cli_secret"
     if ! check_http_ok "포트폴리오 재조회 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
@@ -302,7 +210,7 @@ prepare_single_account() {
         '[.data.content[]? | select(.type == "Sc" or .type == "SC" or .type == "sc")] | first | .accountId // empty')
     [[ -n "$sc_account_id" && "$sc_account_id" != "null" ]] || { log_warn "(${i}) scAccountId 없음, 건너뜀"; return 1; }
 
-    # 3-5. 코인 계좌 조회 (지갑주소)
+    # 2-5. 코인 계좌 조회 (지갑주소)
     call_api GET "${LIFECYCLE_BASE}/accounts/sc/${sc_account_id}" \
         "$cli_id" "$cli_secret"
     if ! check_http_ok "코인계좌 조회 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
@@ -311,28 +219,38 @@ prepare_single_account() {
     [[ -n "$wallet_address" && "$wallet_address" != "null" ]] || { log_warn "(${i}) 지갑주소 없음, 건너뜀"; return 1; }
 
     # ============================================
-    # 4. ZK 비밀계좌 생성
+    # 3. ZK 비밀계좌 생성 (sender + receiver)
     # ============================================
+    # 3-1. sender 계좌
     call_api POST "${SDS_ZK_BASE}/accounts" \
         "$ADMIN_CLIENT_ID" "$ADMIN_CLIENT_SECRET"
-    if ! check_http_ok "ZK 계좌 생성 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
+    if ! check_http_ok "ZK sender 계좌 생성 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
     local zk_account_id signer_address
     zk_account_id=$(extract_json "$RESPONSE" '.data.accountId // empty')
     signer_address=$(extract_json "$RESPONSE" '.data.signerAddress // empty')
     [[ -n "$zk_account_id" && "$zk_account_id" != "null" ]] || { log_warn "(${i}) ZK accountId 없음, 건너뜀"; return 1; }
 
+    # 3-2. receiver 계좌
+    call_api POST "${SDS_ZK_BASE}/accounts" \
+        "$ADMIN_CLIENT_ID" "$ADMIN_CLIENT_SECRET"
+    if ! check_http_ok "ZK receiver 계좌 생성 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
+    local receiver_account_id receiver_signer_address
+    receiver_account_id=$(extract_json "$RESPONSE" '.data.accountId // empty')
+    receiver_signer_address=$(extract_json "$RESPONSE" '.data.signerAddress // empty')
+    [[ -n "$receiver_account_id" && "$receiver_account_id" != "null" ]] || { log_warn "(${i}) receiver accountId 없음, 건너뜀"; return 1; }
+
     # ============================================
-    # 5. 전송 (On to On)
+    # 4. 전송 (On to On)
     # ============================================
 
-    # 5-1. 코인 계좌 재조회
+    # 4-1. 코인 계좌 재조회
     call_api GET "${LIFECYCLE_BASE}/accounts/sc/${sc_account_id}" \
         "$cli_id" "$cli_secret"
     if ! check_http_ok "코인계좌 재조회 (${i})"; then log_warn "(${i}) 건너뜀"; return 1; fi
     wallet_address=$(extract_json "$RESPONSE" '.data.scWalletAddress // .data.walletAddress // empty')
     [[ -n "$wallet_address" && "$wallet_address" != "null" ]] || { log_warn "(${i}) 지갑주소 재조회 실패, 건너뜀"; return 1; }
 
-    # 5-2. SC 토큰 → ZK signer address 전송
+    # 4-2. SC 토큰 → ZK signer address 전송
     call_api POST "${LIFECYCLE_BASE}/transfers" \
         "$cli_id" "$cli_secret" \
         "{
@@ -348,40 +266,10 @@ prepare_single_account() {
         --arg accountId "$zk_account_id" \
         --arg signerAddress "$signer_address" \
         --arg tokenAddress "$token_address" \
-        '{accountId: $accountId, signerAddress: $signerAddress, tokenAddress: $tokenAddress}' >&4
+        --arg receiverAccountId "$receiver_account_id" \
+        --arg receiverSignerAddress "$receiver_signer_address" \
+        '{accountId: $accountId, signerAddress: $signerAddress, tokenAddress: $tokenAddress, receiverAccountId: $receiverAccountId, receiverSignerAddress: $receiverSignerAddress}' >&4
     log_ok "(${i}/${count}) 완료 → accountId: ${zk_account_id}"
-}
-
-issue_issuance_with_retry() {
-    local sc_issue_id="$1"
-    local worker_index="$2"
-    local attempt
-    local max_attempts=6
-    local delay=1
-
-    for (( attempt=1; attempt<=max_attempts; attempt++ )); do
-        call_api PUT "${LIFECYCLE_BASE}/issuances/${sc_issue_id}/issue" \
-            "$ISSUER_CLIENT_ID" "$ISSUER_CLIENT_SECRET" \
-            ""
-
-        if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "201" ]]; then
-            return 0
-        fi
-
-        if [[ "$HTTP_STATUS" != "302" && "$HTTP_STATUS" != "409" && "$HTTP_STATUS" != "423" && "$HTTP_STATUS" != "429" && "$HTTP_STATUS" != "500" && "$HTTP_STATUS" != "502" && "$HTTP_STATUS" != "503" ]]; then
-            return 1
-        fi
-
-        if (( attempt == max_attempts )); then
-            return 1
-        fi
-
-        log_warn "(${worker_index}) 발행 실행 재시도 대기 (${attempt}/${max_attempts}, HTTP ${HTTP_STATUS}, ${delay}s)"
-        sleep "$delay"
-        if (( delay < 5 )); then
-            delay=$(( delay + 1 ))
-        fi
-    done
 }
 
 prepare_accounts() {
@@ -610,19 +498,19 @@ if [[ "$SECTION" == "multi" || "$SECTION" == "all" ]]; then
     } >> "$RESULT_FILE"
 
     for vu in "${VUS_LIST[@]}"; do
-        local_iters=$(( MULTI_ITERATIONS * vu ))
-        log_step "다중 테스트 VU=${vu} barrier 실행 중 (VU당 ${MULTI_ITERATIONS}회)"
-        tmp=$(run_k6 "barrier" "$vu" --iterations "$local_iters" "${SHARED_ACCOUNTS_FILE:-}")
-        log_ok "VU=${vu} barrier 완료, 메트릭 추출 중..."
+        log_step "다중 테스트 VU=${vu} barrier 실행 중 (1사이클, phase간 동기화)"
+        tmp=$(run_k6 "barrier" "$vu" --iterations "$vu" "${SHARED_ACCOUNTS_FILE:-}")
+        log_ok "VU=${vu} 완료, 메트릭 추출 중..."
 
         for api in account approve deposit send receive withdraw; do
-            tps=$(rate_val "$tmp" "api_${api}_count")
             er=$(error_rate "$tmp")
             avg=$(trend_val "$tmp" "api_${api}" "avg")
             p95=$(trend_val "$tmp" "api_${api}" "p(95)")
             p99=$(trend_val "$tmp" "api_${api}" "p(99)")
-            log_info "  [${api}] avg=$(fmt_ms "$avg") p95=$(fmt_ms "$p95") p99=$(fmt_ms "$p99")"
-            echo "| ${api} | ${CPU_CORES} | ${vu} | $(fmt_tps "$tps") | $(fmt_ms "$avg") | $(fmt_ms "$p95") | $(fmt_ms "$p99") | ${er}% |" \
+            # TPS = VU수 / 평균응답시간(초) (Little's Law)
+            tps=$(awk "BEGIN { if ($avg > 0) printf \"%.2f\", $vu / ($avg / 1000); else print \"0\" }")
+            log_info "  [${api}] TPS=${tps} avg=$(fmt_ms "$avg") p95=$(fmt_ms "$p95") p99=$(fmt_ms "$p99")"
+            echo "| ${api} | ${CPU_CORES} | ${vu} | ${tps} | $(fmt_ms "$avg") | $(fmt_ms "$p95") | $(fmt_ms "$p99") | ${er}% |" \
                 >> "$RESULT_FILE"
         done
         rm -f "$tmp"
@@ -648,9 +536,8 @@ if [[ "$SECTION" == "e2e" || "$SECTION" == "all" ]]; then
     E2E_SCENARIO="approve > deposit > account > send > receive > withdraw"
 
     for vu in "${VUS_LIST[@]}"; do
-        local_iters=$(( MULTI_ITERATIONS * vu ))
-        log_step "E2E VU=${vu} 실행 중 (계정 ${vu}개, ${local_iters}회)..."
-        tmp=$(run_k6 "e2e" "$vu" --iterations "$local_iters" "${SHARED_ACCOUNTS_FILE:-}")
+        log_step "E2E VU=${vu} 실행 중 (계정 ${vu}개, 1사이클)..."
+        tmp=$(run_k6 "e2e" "$vu" --iterations "$vu" "${SHARED_ACCOUNTS_FILE:-}")
         log_ok "VU=${vu} k6 완료, E2E 메트릭 추출 중..."
 
         tps=$(rate_val "$tmp")
