@@ -88,7 +88,7 @@ run_k6() {
             -e "$accounts_arg" \
             --vus "$vus" \
             "$count_flag" "$count_val" \
-            "${SCRIPT_DIR}/loadtest.js" > "$tmp_out" || true
+            "${SCRIPT_DIR}/loadtest.js" > "$tmp_out" 2>&1 || true
     else
         k6 run \
             -e SDS_ZK_BASE="http://localhost:8080/rest/zktransfer" \
@@ -100,10 +100,31 @@ run_k6() {
             -e BARRIER_ITERS="$MULTI_ITERATIONS" \
             --vus "$vus" \
             "$count_flag" "$count_val" \
-            "${SCRIPT_DIR}/loadtest.js" > "$tmp_out" || true
+            "${SCRIPT_DIR}/loadtest.js" > "$tmp_out" 2>&1 || true
     fi
 
     echo "$tmp_out"
+}
+
+# ---- k6 phase 출력에서 __PHASE_DATA__ 파싱 → accounts 파일 병합 ----
+merge_phase_data() {
+    local k6_output="$1"
+    local accounts_file="$2"
+
+    local phase_json
+    phase_json=$(grep '__PHASE_DATA__' "$k6_output" 2>/dev/null \
+        | sed 's/.*__PHASE_DATA__//; s/\\"/"/g; s/"[[:space:]]*source=console.*//' \
+        | sed 's/"$//' || true)
+    [[ -z "$phase_json" ]] && return 0
+
+    local phase_array
+    phase_array=$(echo "$phase_json" | jq -s '.')
+
+    jq --argjson phase "$phase_array" '
+        reduce ($phase[]) as $p (.;
+            .[$p.vu - 1] += ($p | del(.vu))
+        )
+    ' "$accounts_file" > "${accounts_file}.tmp" && mv "${accounts_file}.tmp" "$accounts_file"
 }
 
 # ---- 다중 테스트 / E2E 공용 계정 사전 준비 ----
@@ -492,22 +513,56 @@ if [[ "$SECTION" == "multi" || "$SECTION" == "all" ]]; then
     } >> "$RESULT_FILE"
 
     for vu in "${VUS_LIST[@]}"; do
-        log_step "다중 테스트 VU=${vu} barrier 실행 중 (1사이클, phase간 동기화)"
-        tmp=$(run_k6 "barrier" "$vu" --iterations "$vu" "${SHARED_ACCOUNTS_FILE:-}")
-        log_ok "VU=${vu} 완료, 메트릭 추출 중..."
+        log_step "다중 테스트 VU=${vu} phase별 순차 실행"
 
+        # 원본 accounts 파일 복사 (phase간 데이터 전달용)
+        working_accounts="${SCRIPT_DIR}/accounts_vu${vu}_${TIMESTAMP}.json"
+        cp "$SHARED_ACCOUNTS_FILE" "$working_accounts"
+
+        # Phase별 순차 실행 — 이전 phase가 100% 완료된 후 다음 phase 시작
+        log_info "  [VU=${vu}] phase: approve"
+        tmp_approve=$(run_k6 "phase_approve" "$vu" --iterations "$vu" "$working_accounts")
+
+        log_info "  [VU=${vu}] phase: deposit"
+        tmp_deposit=$(run_k6 "phase_deposit" "$vu" --iterations "$vu" "$working_accounts")
+
+        log_info "  [VU=${vu}] phase: account"
+        tmp_account=$(run_k6 "phase_account" "$vu" --iterations "$vu" "$working_accounts")
+        merge_phase_data "$tmp_account" "$working_accounts"
+
+        log_info "  [VU=${vu}] phase: send"
+        tmp_send=$(run_k6 "phase_send" "$vu" --iterations "$vu" "$working_accounts")
+        merge_phase_data "$tmp_send" "$working_accounts"
+
+        log_info "  [VU=${vu}] phase: receive"
+        tmp_receive=$(run_k6 "phase_receive" "$vu" --iterations "$vu" "$working_accounts")
+
+        log_info "  [VU=${vu}] phase: withdraw"
+        tmp_withdraw=$(run_k6 "phase_withdraw" "$vu" --iterations "$vu" "$working_accounts")
+
+        log_ok "VU=${vu} 전체 phase 완료, 메트릭 추출 중..."
+
+        # 각 phase의 k6 출력에서 메트릭 추출
         for api in account approve deposit send receive withdraw; do
+            case "$api" in
+                approve)  tmp="$tmp_approve" ;;
+                deposit)  tmp="$tmp_deposit" ;;
+                account)  tmp="$tmp_account" ;;
+                send)     tmp="$tmp_send" ;;
+                receive)  tmp="$tmp_receive" ;;
+                withdraw) tmp="$tmp_withdraw" ;;
+            esac
             er=$(error_rate "$tmp" "$api")
             avg=$(trend_val "$tmp" "api_${api}" "avg")
             p95=$(trend_val "$tmp" "api_${api}" "p(95)")
             p99=$(trend_val "$tmp" "api_${api}" "p(99)")
-            # TPS = VU수 / 평균응답시간(초) (Little's Law)
             tps=$(awk "BEGIN { if ($avg > 0) printf \"%.2f\", $vu / ($avg / 1000); else print \"0\" }")
             log_info "  [${api}] TPS=${tps} avg=$(fmt_ms "$avg") p95=$(fmt_ms "$p95") p99=$(fmt_ms "$p99")"
             echo "| ${api} | ${CPU_CORES} | ${vu} | ${tps} | $(fmt_ms "$avg") | $(fmt_ms "$p95") | $(fmt_ms "$p99") | ${er}% |" \
                 >> "$RESULT_FILE"
         done
-        rm -f "$tmp"
+
+        rm -f "$tmp_approve" "$tmp_deposit" "$tmp_account" "$tmp_send" "$tmp_receive" "$tmp_withdraw" "$working_accounts"
         log_ok "다중 테스트 VU=${vu} 완료"
     done
 

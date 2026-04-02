@@ -308,6 +308,35 @@ function runMode(sender, label) {
         try { doWithdraw(recvId, recvSigner, tokenAddress); } catch (e) { console.error(`[${label}] withdraw 실패: ${e.message}`); }
         break;
     }
+    // --- Phase별 독립 실행 모드 (Bash 레벨 동기화용) ---
+    case 'phase_approve':
+        console.log(`[${label}] phase_approve`);
+        doApprove(sender.accountId, tokenAddress);
+        break;
+    case 'phase_deposit':
+        console.log(`[${label}] phase_deposit`);
+        doDeposit(sender.accountId, tokenAddress);
+        break;
+    case 'phase_account': {
+        console.log(`[${label}] phase_account`);
+        const acct2 = doAccount();
+        console.log(`__PHASE_DATA__${JSON.stringify({vu: __VU, receiverAccountId: acct2.accountId, receiverSignerAddress: acct2.signerAddress})}`);
+        break;
+    }
+    case 'phase_send': {
+        console.log(`[${label}] phase_send`);
+        const txHash = doSend(sender.accountId, sender.receiverAccountId, tokenAddress);
+        console.log(`__PHASE_DATA__${JSON.stringify({vu: __VU, txHash: txHash})}`);
+        break;
+    }
+    case 'phase_receive':
+        console.log(`[${label}] phase_receive`);
+        doReceive(sender.receiverAccountId, sender.txHash, tokenAddress);
+        break;
+    case 'phase_withdraw':
+        console.log(`[${label}] phase_withdraw`);
+        doWithdraw(sender.receiverAccountId, sender.receiverSignerAddress, tokenAddress);
+        break;
     default:
         throw new Error(`지원하지 않는 TEST_MODE: ${MODE}`);
     }
