@@ -50,7 +50,9 @@ SC_ID=$(grep "^SC_ID=" "${SCRIPT_DIR}/.state" | cut -d'=' -f2 || echo "")
 # ---- 설정 ----
 SINGLE_ITERATIONS=10
 MULTI_ITERATIONS=10
+E2E_ITERATIONS=5
 VUS_LIST=(10 20 30)
+E2E_VUS_LIST=(100)
 APIS=(account approve deposit send receive withdraw)
 
 LOG_DIR="${SCRIPT_DIR}/logs"
@@ -444,7 +446,9 @@ fmt_tps() {
     echo "| CPU | ${CPU_CORES} Core |"
     echo "| 단건 반복 횟수 | ${SINGLE_ITERATIONS} |"
     echo "| 다중 VU당 반복 횟수 | ${MULTI_ITERATIONS} |"
-    echo "| VU | ${VUS_LIST[*]} |"
+    echo "| 다중 VU | ${VUS_LIST[*]} |"
+    echo "| E2E VU당 반복 횟수 | ${E2E_ITERATIONS} |"
+    echo "| E2E VU | ${E2E_VUS_LIST[*]} |"
     echo ""
     echo "---"
     echo ""
@@ -492,7 +496,9 @@ fi
 
 # 다중/E2E 테스트는 계정 사전 준비가 필요
 if [[ "$SECTION" == "multi" || "$SECTION" == "e2e" || "$SECTION" == "all" ]]; then
-    MAX_VU="${VUS_LIST[${#VUS_LIST[@]}-1]}"
+    MAX_VU_MULTI="${VUS_LIST[${#VUS_LIST[@]}-1]}"
+    MAX_VU_E2E="${E2E_VUS_LIST[${#E2E_VUS_LIST[@]}-1]}"
+    MAX_VU=$(( MAX_VU_MULTI > MAX_VU_E2E ? MAX_VU_MULTI : MAX_VU_E2E ))
     log_header "계정 사전 준비 (최대 VU: ${MAX_VU}개)"
     SHARED_ACCOUNTS_FILE=$(resolve_shared_accounts_file "$MAX_VU") || SHARED_ACCOUNTS_FILE=""
 
@@ -584,9 +590,10 @@ if [[ "$SECTION" == "e2e" || "$SECTION" == "all" ]]; then
 
     E2E_SCENARIO="approve > deposit > account > send > receive > withdraw"
 
-    for vu in "${VUS_LIST[@]}"; do
-        log_step "E2E VU=${vu} 실행 중 (계정 ${vu}개, 1사이클)..."
-        tmp=$(run_k6 "e2e" "$vu" --iterations "$vu" "${SHARED_ACCOUNTS_FILE:-}")
+    for vu in "${E2E_VUS_LIST[@]}"; do
+        total_iters=$(( vu * E2E_ITERATIONS ))
+        log_step "E2E VU=${vu} 실행 중 (계정 ${vu}개, VU당 ${E2E_ITERATIONS}회, 총 ${total_iters}회)..."
+        tmp=$(run_k6 "e2e" "$vu" --iterations "$total_iters" "${SHARED_ACCOUNTS_FILE:-}")
         log_ok "VU=${vu} k6 완료, E2E 메트릭 추출 중..."
 
         tps=$(rate_val "$tmp")
